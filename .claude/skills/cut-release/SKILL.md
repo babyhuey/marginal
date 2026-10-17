@@ -1,8 +1,8 @@
 ---
 name: cut-release
 description: >-
-  Cut a marginal release: bump CHANGELOG.md's `UNDER DEVELOPMENT` header to a
-  real version + date, bump `pyproject.toml`, tag it, and draft GitHub release
+  Cut a marginal release: build CHANGELOG.md's new version section from the
+  `changelog.d/` fragments with towncrier, bump `pyproject.toml`, tag it, and draft GitHub release
   notes with a contributor-thanks section pulled from PRs merged since the
   last tag. Publishing (which triggers the PyPI trusted-publish workflow)
   only happens on explicit confirmation, never automatically. Use when the
@@ -21,89 +21,39 @@ publish must be an explicit, confirmed action -- never a default.
 
 ## Step 1 — Decide the version number
 
-Read the current `## UNDER DEVELOPMENT marginal vx.x.x, xxxx-xx-xx` section
-of `CHANGELOG.md` and the current `version` in `pyproject.toml`.
+Unreleased entries live as fragments in `changelog.d/` (`<issue>.<type>.md`),
+not in `CHANGELOG.md`. Preview them and read the current `version` in
+`pyproject.toml`:
 
-- If `### Breaking Changes` under `UNDER DEVELOPMENT` has any entries, this is
-  a breaking release. Pre-1.0, that means bumping the *minor* (`0.1.x` ->
-  `0.2.0`), not the patch -- the project doesn't yet promise patch-level
-  compatibility guarantees, but a breaking change is still worth signaling
-  above a patch bump.
+```bash
+towncrier build --draft --version next
+```
+
+- If there's any `changelog.d/*.breaking.md` fragment (the preview's
+  `### Breaking Changes` has entries), this is a breaking release. Pre-1.0,
+  that means bumping the *minor* (`0.1.x` -> `0.2.0`), not the patch -- the
+  project doesn't yet promise patch-level compatibility guarantees, but a
+  breaking change is still worth signaling above a patch bump.
 - Otherwise, bump the patch (`0.1.3` -> `0.1.4`).
+- If `changelog.d/` has no fragments at all, there's nothing to release --
+  say so and stop.
 
 **Confirm the version number and date with the user before proceeding** --
 this is a real, externally-visible decision, not a mechanical default to
 apply silently.
 
-## Step 2 — Bump CHANGELOG.md
+## Step 2 — Build CHANGELOG.md
 
-The top of `CHANGELOG.md` always looks like this, with some categories
-populated and some empty:
-
-```markdown
-## UNDER DEVELOPMENT marginal vx.x.x, xxxx-xx-xx
-
-### Breaking Changes
-
-### New Features
-
-- ...entries...
-
-### Improvements
-
-- ...entries...
-
-### Fixes
-
-### Warnings
-
-## marginal v<previous>, <previous date>
-...
+```bash
+towncrier build --version <new> --date <YYYY-MM-DD> --yes
 ```
 
-Cutting a release is a mechanical split: the `UNDER DEVELOPMENT` header
-stays exactly where it is and keeps its position at the top of the file, but
-becomes an **empty** skeleton again (all five category headers, no
-entries) -- and everything that *was* under it (all its populated
-categories and their bullet entries) moves under a **new** dated section
-inserted directly below, in the same category order:
-
-```markdown
-## UNDER DEVELOPMENT marginal vx.x.x, xxxx-xx-xx
-
-### Breaking Changes
-
-### New Features
-
-### Improvements
-
-### Fixes
-
-### Warnings
-
-## marginal v<new>, <YYYY-MM-DD>
-
-### Breaking Changes
-
-### New Features
-
-- ...entries that were under UNDER DEVELOPMENT's New Features...
-
-### Improvements
-
-- ...entries that were under UNDER DEVELOPMENT's Improvements...
-
-### Fixes
-
-### Warnings
-
-## marginal v<previous>, <previous date>
-...
-```
-
-Do this with the Edit tool directly (read the file, move the text) rather
-than a scripted regex substitution -- the category boundaries are easy to
-get subtly wrong with sed, and this only runs once per release.
+This inserts a `## marginal v<new>, <YYYY-MM-DD>` section (all five category
+headers, empty ones included) directly under the
+`<!-- towncrier release notes start -->` marker at the top of
+`CHANGELOG.md`, then `git rm`s the consumed fragments and stages
+`CHANGELOG.md`. Read the new section back before moving on: it should sit
+above the previous release with one blank line between them.
 
 ## Step 3 — Bump `pyproject.toml`
 
@@ -116,11 +66,11 @@ Follow the naming pattern used by every prior release
 
 ```bash
 git checkout -b release/v<new>
-git add CHANGELOG.md pyproject.toml
+git add CHANGELOG.md changelog.d pyproject.toml
 git commit -m "docs: Cut v<new> release notes
 
-Closes out CHANGELOG.md's UNDER DEVELOPMENT section under a dated
-v<new> heading and bumps pyproject.toml to <new>."
+Builds CHANGELOG.md's v<new> section from the changelog.d fragments and
+bumps pyproject.toml to <new>."
 git push -u origin release/v<new>
 gh pr create --title "docs: Cut v<new> release notes" --body "..."
 ```
