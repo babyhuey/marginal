@@ -1678,7 +1678,7 @@ def test_rerun_with_the_same_finding_reworded_posts_nothing(
     assert exit_code == 0
     client.create_review.assert_not_called()
     err = capsys.readouterr().err
-    assert "skipped 1 finding(s) already posted" in err
+    assert "skipped 1 finding(s) matching one already posted" in err
     assert "nothing was posted" in err
 
 
@@ -1781,3 +1781,21 @@ def test_review_fails_cleanly_when_reading_existing_comments_fails(
     assert exit_code == 1
     assert "marginal review:" in capsys.readouterr().err
     client.create_review.assert_not_called()
+
+
+def test_first_run_posts_neighbouring_same_severity_findings_side_by_side(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    """New findings are only compared with what's already on the PR, never
+    with each other, so two adjacent same-severity findings both post."""
+    _write_reviewer_config(tmp_path)
+    client = mock_github_client.return_value
+    findings = [
+        _finding_at(2, "This sleep blocks the async retry loop."),
+        _finding_at(3, "retry() is called without a cap on attempts."),
+    ]
+
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, [])
+
+    posted = client.create_review.call_args.kwargs["comments"]
+    assert [c["line"] for c in posted] == [2, 3]

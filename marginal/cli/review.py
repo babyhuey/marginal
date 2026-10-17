@@ -230,7 +230,8 @@ def run_review(
             if len(new_findings) < len(findings):
                 print(
                     f"marginal review: skipped {len(findings) - len(new_findings)} finding(s) "
-                    "already posted on this PR",
+                    "matching one already posted on this PR (same file and severity, same or "
+                    "neighbouring line)",
                     file=sys.stderr,
                 )
             already_reviewed = any(REVIEW_HEADING in (r.get("body") or "") for r in reviews)
