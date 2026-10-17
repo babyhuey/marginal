@@ -63,6 +63,10 @@ towncrier build --draft --version next
 At release time, `towncrier build` collects every fragment into a new
 `CHANGELOG.md` section and deletes them.
 
+CI fails a PR that adds no fragment. For a change users won't notice (a
+typo fix, a CI tweak, a test-only refactor), a maintainer can add the
+`skip-changelog` label instead.
+
 ## Package layout
 
 ```text
