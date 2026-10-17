@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import get_args
 
 from marginal.cli.help import run_help
 from marginal.cli.init import run_init
-from marginal.cli.review import run_review
+from marginal.cli.review import OutputFormat, run_review
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,6 +31,13 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument(
         "--comment", action="store_true", help="Post the summary as a PR comment"
     )
+    review_parser.add_argument(
+        "--format",
+        choices=get_args(OutputFormat),
+        default="text",
+        dest="output_format",
+        help="Output format for stdout (default: text)",
+    )
 
     help_parser = subparsers.add_parser("help", help="Show help for a command")
     help_parser.add_argument(
@@ -43,7 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return run_init(args.path, force=args.force)
     if args.command == "review":
-        return run_review(args.repo, args.pr_number, comment=args.comment)
+        return run_review(
+            args.repo, args.pr_number, comment=args.comment, output_format=args.output_format
+        )
 
     parser.error(f"unknown command: {args.command}")
     return 2
