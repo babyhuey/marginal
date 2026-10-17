@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 from collections import Counter
 from pathlib import Path
@@ -57,6 +58,12 @@ MAX_REPLY_THREADS = 10
 _REPLY_COMMENT_CHARS = 600
 _REPLY_TEXT_CHARS = 1500
 
+# Rough characters-per-token ratio for estimating a prompt's size without a
+# provider-specific tokenizer. Code and diffs tokenize denser than English
+# prose (~4 chars/token), so 3 errs toward over-counting: the cap stays a
+# real ceiling rather than one a prompt can quietly overshoot.
+_CHARS_PER_TOKEN = 3
+
 OutputFormat = Literal["text", "json"]
 
 # Every review marginal posts opens with this, which is how a re-run spots
@@ -74,6 +81,10 @@ FINDING_PROMPT_INSTRUCTIONS = (
     "false positive or a stylistic nitpick), and a concise 2-3 sentence "
     "explanation of the problem."
 )
+
+
+class _PromptOverBudget(Exception):
+    """The built prompt's estimated size exceeds `review.max_prompt_tokens`."""
 
 
 class _FindingsResponse(BaseModel):
@@ -127,6 +138,18 @@ def run_review(
     badge (e.g. `🔴 **Critical** · 92% confidence`) followed by its message.
     Without `models.reviewer`, or if every finding gets filtered out, the
     summary stays metadata-only, same as if nothing was generated.
+
+    Before any model call, the fully built prompt's size is estimated
+    (`_estimate_tokens`, a length heuristic) and checked against
+    `config.review.max_prompt_tokens`. Over the cap, the model is never
+    called -- marginal bills the user's own API key, so an unexpectedly huge
+    prompt is skipped rather than paid for. That's a degraded review, not a
+    failure: it prints a one-line stderr notice, exits 0, and the summary
+    stays metadata-only plus a `⚠️ **Review skipped**` line, so it can't be
+    mistaken for a review that found nothing. With `comment` set that
+    summary is posted even if marginal already reviewed this PR, since the
+    new push went unreviewed; `--format json` reports
+    `"prompt_over_budget": true`.
 
     With `config.context.code_graph` (on by default), the prompt also names
     any definition this diff changes that's called from a file outside the
@@ -208,6 +231,7 @@ def run_review(
     findings: list[Finding] = []
     redacted_files: list[str] = []
     coverage_lines: list[str] = []
+    over_budget: _PromptOverBudget | None = None
     if reviewer_model is not None:
         policies = load_policies(path, config.policies)
         redacted = _redact_patches(files)
@@ -217,7 +241,22 @@ def run_review(
         replies = maintainer_replies(review_comments)
         try:
             findings = asyncio.run(
-                _generate_findings(reviewer_model, redacted, policies, graph_context, path, replies)
+                _generate_findings(
+                    reviewer_model,
+                    redacted,
+                    policies,
+                    graph_context,
+                    path,
+                    replies,
+                    max_prompt_tokens=config.review.max_prompt_tokens,
+                )
+            )
+        except _PromptOverBudget as exc:
+            over_budget = exc
+            print(
+                f"marginal review: skipped generating findings: {exc} -- raise the cap in "
+                ".marginal/config.yaml or split the PR to review it",
+                file=sys.stderr,
             )
         except MissingCredentialsError as exc:
             print(f"marginal review: {exc}", file=sys.stderr)
@@ -232,12 +271,16 @@ def run_review(
         max_comments=config.review.max_comments,
     )
 
-    # Without a reviewer model nothing was reviewed, so there's no verdict to give.
-    reviewed = reviewer_model is not None
+    # Without a model call nothing was reviewed, so there's no verdict to give.
+    reviewed = reviewer_model is not None and over_budget is None
     base_lines = _base_lines(
         pr_number, pull_request, filenames, _verdict(findings) if reviewed else None
     )
-    warning_lines = _redaction_warning_lines(redacted_files) + coverage_lines
+    warning_lines = (
+        _budget_warning_lines(over_budget)
+        + _redaction_warning_lines(redacted_files)
+        + coverage_lines
+    )
     if output_format == "text":
         print(
             "\n".join(
@@ -263,7 +306,7 @@ def run_review(
                     file=sys.stderr,
                 )
             already_reviewed = any(REVIEW_HEADING in (r.get("body") or "") for r in reviews)
-            if new_findings or not already_reviewed:
+            if new_findings or not already_reviewed or over_budget is not None:
                 verdict = _verdict(new_findings, already_posted=len(findings) - len(new_findings))
                 body = "\n".join(
                     _base_lines(pr_number, pull_request, filenames, verdict if reviewed else None)
@@ -304,6 +347,7 @@ def run_review(
             findings,
             redacted_files,
             comment_posted=comment_posted,
+            prompt_over_budget=over_budget is not None,
         )
         print(json.dumps(result, indent=2))
 
@@ -460,6 +504,7 @@ def _build_json_result(
     redacted_files: list[str],
     *,
     comment_posted: bool,
+    prompt_over_budget: bool,
 ) -> dict[str, object]:
     """Build the `--format json` payload for one review run.
 
@@ -467,7 +512,10 @@ def _build_json_result(
     the changed-file list, the surviving `findings` (each dumped via
     `Finding.model_dump(mode="json")`, so `severity` comes out as its plain
     string value rather than the `Severity` enum member) and `redacted_files`
-    -- plus `comment_posted`, which the text summary never states explicitly.
+    -- plus `comment_posted`, which the text summary never states explicitly,
+    and `prompt_over_budget`, true when the model was never called because the
+    prompt exceeded `review.max_prompt_tokens` (so empty `findings` mean
+    "not reviewed", not "nothing found").
     A finding's `line` being `None` means what it does for
     `_build_inline_comments`.
     """
@@ -482,6 +530,7 @@ def _build_json_result(
         "findings": [finding.model_dump(mode="json") for finding in findings],
         "redacted_files": redacted_files,
         "comment_posted": comment_posted,
+        "prompt_over_budget": prompt_over_budget,
     }
 
 
@@ -492,17 +541,47 @@ async def _generate_findings(
     graph_context: list[ChangedDefinition],
     repo_root: str,
     replies: list[ReplyThread],
+    *,
+    max_prompt_tokens: int,
 ) -> list[Finding]:
     """Generate a bounded list of unvalidated `Finding`s from `model_spec` over
-    `files`' diffs, `policies`, `graph_context`, and maintainer `replies`."""
-    provider = get_provider(model_spec)
+    `files`' diffs, `policies`, `graph_context`, and maintainer `replies`.
+
+    Raises `_PromptOverBudget` without touching the provider if the built
+    prompt is estimated over `max_prompt_tokens`. The check runs on the final
+    prompt string, so every section the builder adds counts toward the cap.
+    """
     prompt = _build_finding_prompt(files, policies, graph_context, repo_root, replies)
+    estimated_tokens = _estimate_tokens(prompt)
+    if estimated_tokens > max_prompt_tokens:
+        raise _PromptOverBudget(
+            f"the review prompt is an estimated {estimated_tokens:,} tokens, over "
+            f"review.max_prompt_tokens ({max_prompt_tokens:,}), so no model was called"
+        )
+    provider = get_provider(model_spec)
     result = await provider.generate_structured(prompt, schema=_FindingsResponse)
     if not isinstance(result, _FindingsResponse):
         raise ProviderResponseError(
             f"expected a _FindingsResponse from generate_structured, got {type(result).__name__}"
         )
     return result.findings
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count for `text`. Exact counts are provider- and
+    model-specific; this only needs to catch prompts far beyond normal size."""
+    return math.ceil(len(text) / _CHARS_PER_TOKEN)
+
+
+def _budget_warning_lines(over_budget: _PromptOverBudget | None) -> list[str]:
+    """Render a warning that generation was skipped for size, or `[]`.
+
+    First among the warnings: with no model call, nothing in the diff was
+    reviewed, so the empty findings list must not read as a clean bill.
+    """
+    if over_budget is None:
+        return []
+    return ["", f"⚠️ **Review skipped** -- {over_budget}, so nothing in this diff was reviewed."]
 
 
 def _build_graph_context(
