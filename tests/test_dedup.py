@@ -32,7 +32,6 @@ def test_same_line_text_matches_after_the_line_shifts():
     assert fp(11) == fp(15, patch=PATCH.replace("+10,4", "+14,4"))
 
 
-
 def test_same_line_text_matches_when_the_hunk_around_it_changes():
     # A later push widens the hunk: new lines above and below, a different
     # header -- the flagged line itself is untouched.
@@ -48,6 +47,7 @@ def test_same_line_text_matches_when_the_hunk_around_it_changes():
     )
 
     assert fp(11) == fp(9, patch=wider)
+
 
 def test_different_line_text_differs():
     changed = PATCH.replace("+    time.sleep(1)", "+    await asyncio.sleep(1)")
