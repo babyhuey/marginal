@@ -1,0 +1,254 @@
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from marginal.cli import main
+from marginal.cli.compact import COMPACT_HEADING, _Recheck, _RecheckResponse
+from marginal.github.errors import GitHubAPIError
+from marginal.providers.errors import MissingCredentialsError
+from marginal.review.dedup import fingerprint_marker
+from marginal.review.replies import RESOLVED_MARKER, maintainer_replies
+
+PATCH = "@@ -1,2 +1,3 @@\n import time\n+time.sleep(1)\n retry()"
+FILES = [{"filename": "retry.py", "patch": PATCH}]
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".marginal"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "version: 1\nmodels:\n  reviewer:\n    provider: anthropic\n    model: claude-sonnet-5\n"
+    )
+    with patch("marginal.cli.compact.GitHubClient") as cls:
+        cls.return_value.get_pull_request_files.return_value = FILES
+        cls.return_value.list_review_comments.return_value = []
+        cls.return_value.list_review_threads.return_value = []
+        yield cls.return_value
+
+
+@pytest.fixture
+def provider():
+    with patch("marginal.cli.compact.get_provider") as get_provider:
+        yield get_provider.return_value
+
+
+def _finding(id, line=2, path="retry.py", message="time.sleep blocks the event loop."):
+    return {
+        "id": id,
+        "path": path,
+        "line": line,
+        "body": f"🟠 **High** · 90% confidence\n\n{message}\n\n{fingerprint_marker('0' * 16)}",
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+
+
+def _answers(*results):
+    return AsyncMock(
+        return_value=_RecheckResponse(
+            results=[_Recheck(id=id, still_applies=ok, reason=why) for id, ok, why in results]
+        )
+    )
+
+
+def _compact(*args):
+    return main(["compact", "--repo", "acme/widgets", "--pr", "42", *args])
+
+
+def test_no_open_findings_is_a_no_op(client, provider, capsys):
+    client.list_review_comments.return_value = [
+        {"id": 1, "path": "retry.py", "line": 2, "body": "Can we rename this?"}
+    ]
+
+    assert _compact("--comment") == 0
+
+    assert "No open marginal findings on PR #42." in capsys.readouterr().out
+    provider.generate_structured.assert_not_called()
+    client.reply_to_review_comment.assert_not_called()
+
+
+def test_a_finding_that_still_applies_stays_open(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    provider.generate_structured = _answers((1, True, "Still calls time.sleep."))
+
+    assert _compact("--comment") == 0
+
+    out = capsys.readouterr().out
+    assert "✅ 0 resolved · ⏳ 1 still open" in out
+    assert "- ⏳ `retry.py:2`: still applies. Still calls time.sleep." in out
+    client.reply_to_review_comment.assert_not_called()
+
+
+def test_a_stale_finding_gets_a_resolution_reply(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1), _finding(2, line=3)]
+    provider.generate_structured = _answers(
+        (1, False, "Now uses await asyncio.sleep."), (2, True, "Unchanged.")
+    )
+
+    assert _compact("--comment") == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith(COMPACT_HEADING)
+    assert "re-checked 2 open finding(s) · ✅ 1 resolved · ⏳ 1 still open" in out
+    client.reply_to_review_comment.assert_called_once_with(
+        42, 1, f"✅ **Resolved**: Now uses await asyncio.sleep.\n\n{RESOLVED_MARKER}"
+    )
+
+
+def test_without_comment_nothing_is_posted(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    provider.generate_structured = _answers((1, False, "Fixed."))
+
+    assert _compact() == 0
+
+    assert "- ✅ `retry.py:2`: resolved. Fixed." in capsys.readouterr().out
+    client.reply_to_review_comment.assert_not_called()
+
+
+def test_a_finding_whose_file_left_the_diff_resolves_without_the_model(client, provider):
+    client.list_review_comments.return_value = [_finding(1, path="gone.py")]
+
+    assert _compact("--comment") == 0
+
+    provider.generate_structured.assert_not_called()
+    body = client.reply_to_review_comment.call_args.args[2]
+    assert body.startswith("✅ **Resolved**: its file is no longer changed by this PR")
+
+
+def test_an_already_resolved_thread_is_skipped(client, provider, capsys):
+    client.list_review_comments.return_value = [
+        _finding(1),
+        {"id": 2, "in_reply_to_id": 1, "body": f"✅ **Resolved**: fixed\n\n{RESOLVED_MARKER}"},
+    ]
+
+    assert _compact("--comment") == 0
+
+    assert "No open marginal findings" in capsys.readouterr().out
+    provider.generate_structured.assert_not_called()
+
+
+def test_a_finding_the_model_leaves_out_stays_open(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1), _finding(2, line=3)]
+    # Answers only for 1, plus an id it was never asked about.
+    provider.generate_structured = _answers((1, False, "Fixed."), (99, False, "Made up."))
+
+    assert _compact("--comment") == 0
+
+    out = capsys.readouterr().out
+    assert "- ⏳ `retry.py:3`: no answer from the model, left open" in out
+    assert "✅ 1 resolved" in out
+    client.reply_to_review_comment.assert_called_once()
+
+
+def test_the_prompt_carries_each_finding_once_and_its_file_diff(client, provider):
+    client.list_review_comments.return_value = [_finding(7), _finding(8, line=3)]
+    provider.generate_structured = _answers((7, True, "x"), (8, True, "y"))
+
+    _compact()
+
+    prompt = provider.generate_structured.call_args.args[0]
+    assert "--- finding 7 at retry.py:2 ---" in prompt
+    assert "--- finding 8 at retry.py:3 ---" in prompt
+    assert prompt.count("--- retry.py ---\n" + PATCH) == 1
+    assert "marginal:finding:" not in prompt
+
+
+def test_compact_without_a_reviewer_model_fails_cleanly(client, provider, tmp_path, capsys):
+    (tmp_path / ".marginal" / "config.yaml").write_text("version: 1\n")
+
+    assert _compact() == 1
+
+    assert "needs models.reviewer" in capsys.readouterr().err
+
+
+def test_compact_over_the_prompt_budget_calls_no_model(client, provider, tmp_path, capsys):
+    (tmp_path / ".marginal" / "config.yaml").write_text(
+        "version: 1\nreview:\n  max_prompt_tokens: 1\nmodels:\n  reviewer:\n"
+        "    provider: anthropic\n    model: claude-sonnet-5\n"
+    )
+    client.list_review_comments.return_value = [_finding(1)]
+
+    assert _compact("--comment") == 0
+
+    assert "skipped re-checking" in capsys.readouterr().err
+    provider.generate_structured.assert_not_called()
+
+
+def test_compact_missing_credentials_exits_3(client, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    with patch(
+        "marginal.cli.compact.get_provider",
+        side_effect=MissingCredentialsError("needs ANTHROPIC_API_KEY"),
+    ):
+        assert _compact() == 3
+
+
+def test_compact_github_error_exits_1(client, capsys):
+    client.list_review_comments.side_effect = GitHubAPIError(500, "Internal Server Error")
+
+    assert _compact() == 1
+
+    assert capsys.readouterr().err.startswith("marginal compact:")
+
+
+def test_a_resolution_reply_is_not_mistaken_for_a_maintainer_reply():
+    comments = [
+        _finding(1),
+        {
+            "id": 2,
+            "in_reply_to_id": 1,
+            "body": f"✅ **Resolved**: fixed\n\n{RESOLVED_MARKER}",
+            "user": {"login": "someone", "type": "User"},
+        },
+    ]
+
+    assert maintainer_replies(comments) == []
+
+
+def _thread(comment_id, resolved=False):
+    return {"id": f"PRRT_{comment_id}", "is_resolved": resolved, "comment_id": comment_id}
+
+
+def test_a_stale_finding_has_its_thread_resolved_after_the_reply(client, provider):
+    client.list_review_comments.return_value = [_finding(1), _finding(2, line=3)]
+    client.list_review_threads.return_value = [_thread(1), _thread(2)]
+    provider.generate_structured = _answers((1, False, "Fixed."), (2, True, "Unchanged."))
+
+    assert _compact("--comment") == 0
+
+    client.resolve_review_thread.assert_called_once_with("PRRT_1")
+    calls = [c[0] for c in client.method_calls]
+    assert calls.index("reply_to_review_comment") < calls.index("resolve_review_thread")
+
+
+def test_a_failed_thread_resolve_keeps_the_reply_and_the_run(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1)]
+    client.resolve_review_thread.side_effect = GitHubAPIError(200, "Resource not accessible")
+    provider.generate_structured = _answers((1, False, "Fixed."))
+
+    assert _compact("--comment") == 0
+
+    client.reply_to_review_comment.assert_called_once()
+    assert "replied on retry.py:2 but couldn't resolve its thread" in capsys.readouterr().err
+
+
+def test_a_thread_resolved_by_hand_counts_as_closed(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1, resolved=True)]
+
+    assert _compact("--comment") == 0
+
+    assert "No open marginal findings" in capsys.readouterr().out
+    provider.generate_structured.assert_not_called()
+
+
+def test_without_comment_no_thread_is_resolved(client, provider):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1)]
+    provider.generate_structured = _answers((1, False, "Fixed."))
+
+    assert _compact() == 0
+
+    client.resolve_review_thread.assert_not_called()

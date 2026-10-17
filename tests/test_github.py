@@ -243,6 +243,113 @@ def test_pr_comment_reads_denied_without_read_permission(monkeypatch, method):
     session.request.assert_not_called()
 
 
+def test_reply_to_review_comment_posts_in_the_thread(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(201, {"id": 9})
+    client = _client(session=session)
+
+    client.reply_to_review_comment(7, 123, "done")
+
+    call = session.request.call_args
+    assert call.args == (
+        "POST",
+        "https://api.github.com/repos/acme/widgets/pulls/7/comments/123/replies",
+    )
+    assert call.kwargs["json"] == {"body": "done"}
+
+
+def test_reply_to_review_comment_denied_without_write_comments(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    client = _client(PermissionsConfig(write=PermissionsWrite(comments=False)), session)
+
+    with pytest.raises(PermissionDeniedError):
+        client.reply_to_review_comment(7, 123, "done")
+    session.request.assert_not_called()
+
+
+def _threads_page(nodes, next_cursor=None):
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "pageInfo": {
+                            "hasNextPage": next_cursor is not None,
+                            "endCursor": next_cursor,
+                        },
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
+    }
+
+
+def _thread_node(id, resolved, comment_id):
+    return {"id": id, "isResolved": resolved, "comments": {"nodes": [{"databaseId": comment_id}]}}
+
+
+def test_list_review_threads_follows_every_page_and_maps_first_comment(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.side_effect = [
+        _response(200, _threads_page([_thread_node("T1", False, 11)], next_cursor="c1")),
+        _response(200, _threads_page([_thread_node("T2", True, 22)])),
+    ]
+    client = _client(session=session)
+
+    assert client.list_review_threads(7) == [
+        {"id": "T1", "is_resolved": False, "comment_id": 11},
+        {"id": "T2", "is_resolved": True, "comment_id": 22},
+    ]
+    first, second = session.request.call_args_list
+    assert first.args == ("POST", "https://api.github.com/graphql")
+    assert first.kwargs["json"]["variables"] == {
+        "owner": "acme",
+        "name": "widgets",
+        "number": 7,
+        "cursor": None,
+    }
+    assert second.kwargs["json"]["variables"]["cursor"] == "c1"
+
+
+def test_graphql_errors_raise_even_with_http_200(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(
+        200, {"errors": [{"message": "Resource not accessible by integration"}]}
+    )
+    client = _client(session=session)
+
+    with pytest.raises(GitHubAPIError, match="Resource not accessible by integration"):
+        client.resolve_review_thread("T1")
+
+
+def test_resolve_review_thread_sends_the_mutation(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(200, {"data": {"resolveReviewThread": {}}})
+    client = _client(session=session)
+
+    client.resolve_review_thread("T1")
+
+    payload = session.request.call_args.kwargs["json"]
+    assert "resolveReviewThread" in payload["query"]
+    assert payload["variables"] == {"id": "T1"}
+
+
+def test_resolve_review_thread_denied_without_write_comments(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    client = _client(PermissionsConfig(write=PermissionsWrite(comments=False)), session)
+
+    with pytest.raises(PermissionDeniedError):
+        client.resolve_review_thread("T1")
+    session.request.assert_not_called()
+
+
 # -- API errors ---------------------------------------------------------
 
 
