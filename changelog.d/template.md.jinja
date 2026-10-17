@@ -1,0 +1,11 @@
+{% for category, definition in definitions.items() %}
+{% if not loop.first %}
+
+{% endif %}
+### {{ definition.name }}
+{% for text in sections[""].get(category, {}) %}
+
+- {{ text }}
+{% endfor %}
+{% endfor %}
+{{ "\n" }}

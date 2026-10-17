@@ -34,10 +34,43 @@ marginal = "marginal.cli:main"
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.34"]
 openai = ["openai>=1.40"]
-dev = ["ruff>=0.6", "pytest>=8", "pytest-asyncio>=0.24", "anthropic>=0.34", "openai>=1.40"]
+dev = ["ruff>=0.6", "pytest>=8", "pytest-asyncio>=0.24", "towncrier>=24.7", "anthropic>=0.34", "openai>=1.40"]
 
 [tool.setuptools.packages.find]
 include = ["marginal*"]
+
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+title_format = "## marginal v{version}, {project_date}"
+template = "changelog.d/template.md.jinja"
+underlines = ["", "", ""]
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feature"
+name = "New Features"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "improvement"
+name = "Improvements"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fix"
+name = "Fixes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "warning"
+name = "Warnings"
+showcontent = true
 
 [tool.ruff]
 line-length = 100
