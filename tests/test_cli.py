@@ -334,8 +334,8 @@ def test_build_inline_comments_builds_one_entry_per_anchored_finding():
         ),
     ]
 
-    marker_a = fingerprint_marker(finding_fingerprint("a.py", 10, "issue in a", None))
-    marker_c = fingerprint_marker(finding_fingerprint("c.py", 3, "issue in c", None))
+    marker_a = fingerprint_marker(finding_fingerprint("a.py", 10, "high", "issue in a", None))
+    marker_c = fingerprint_marker(finding_fingerprint("c.py", 3, "medium", "issue in c", None))
     assert _build_inline_comments(findings, {}) == [
         {
             "path": "a.py",
@@ -607,6 +607,7 @@ def test_review_with_anchored_finding_posts_it_as_inline_comment(
                         finding_fingerprint(
                             "marginal/retry.py",
                             2,
+                            "high",
                             "This introduces a blocking sleep in an async retry loop.",
                             "@@ -1,3 +1,4 @@\n+time.sleep(1)",
                         )
@@ -678,7 +679,9 @@ def test_review_with_unanchored_finding_posts_it_in_the_summary_body_not_inline(
     assert "🟡 **Medium** · 90% confidence — `marginal/retry.py`" in out
 
     marker = fingerprint_marker(
-        finding_fingerprint("marginal/retry.py", None, "Consider adding a backoff cap.", None)
+        finding_fingerprint(
+            "marginal/retry.py", None, "medium", "Consider adding a backoff cap.", None
+        )
     )
     client.create_review.assert_called_once_with(
         42, out.rstrip("\n") + "\n" + marker, event="COMMENT", comments=[]
@@ -1624,8 +1627,10 @@ def test_build_json_result_serializes_a_finding_as_plain_json():
 _RETRY_PATCH = "@@ -1,2 +1,3 @@\n import time\n+time.sleep(1)\n retry()"
 
 
-def _finding_at(line, message, file="marginal/retry.py"):
-    return Finding(file=file, line=line, severity=Severity.HIGH, confidence=0.9, message=message)
+def _finding_at(line, message, severity=Severity.HIGH):
+    return Finding(
+        file="marginal/retry.py", line=line, severity=severity, confidence=0.9, message=message
+    )
 
 
 def _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, posted):
@@ -1686,7 +1691,7 @@ def test_rerun_posts_only_the_new_finding(
     _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, [old], [])
     first_post = client.create_review.call_args
 
-    new = _finding_at(3, "retry() is called without a cap on attempts.")
+    new = _finding_at(3, "retry() is called without a cap on attempts.", Severity.MEDIUM)
     exit_code = _run_review_posting(
         tmp_path, monkeypatch, mock_github_client, mock_provider, [old, new], [first_post]
     )

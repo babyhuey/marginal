@@ -20,7 +20,12 @@ from marginal.policy import load_policies
 from marginal.providers.errors import MissingCredentialsError, ProviderError, ProviderResponseError
 from marginal.providers.factory import get_provider
 from marginal.review import Finding, Severity, filter_findings
-from marginal.review.dedup import finding_fingerprint, fingerprint_marker, posted_fingerprints
+from marginal.review.dedup import (
+    finding_fingerprint,
+    fingerprint_marker,
+    nearby_fingerprints,
+    posted_fingerprints,
+)
 from marginal.review.redact import redact_secrets
 
 SEVERITY_EMOJI = {
@@ -221,7 +226,7 @@ def run_review(
                 [review.get("body") for review in reviews]
                 + [c.get("body") for c in client.list_review_comments(pr_number)]
             )
-            new_findings = [f for f in findings if _fingerprint(f, patches) not in posted]
+            new_findings = [f for f in findings if not _nearby_fingerprints(f, patches) & posted]
             if len(new_findings) < len(findings):
                 print(
                     f"marginal review: skipped {len(findings) - len(new_findings)} finding(s) "
@@ -366,8 +371,22 @@ def _build_inline_comments(
 
 
 def _fingerprint(finding: Finding, patches: dict[str, str | None]) -> str:
-    return finding_fingerprint(
-        finding.file, finding.line, finding.message, patches.get(finding.file)
+    return finding_fingerprint(*_identity(finding, patches))
+
+
+def _nearby_fingerprints(finding: Finding, patches: dict[str, str | None]) -> set[str]:
+    return nearby_fingerprints(*_identity(finding, patches))
+
+
+def _identity(
+    finding: Finding, patches: dict[str, str | None]
+) -> tuple[str, int | None, str, str, str | None]:
+    return (
+        finding.file,
+        finding.line,
+        finding.severity.value,
+        finding.message,
+        patches.get(finding.file),
     )
 
 
