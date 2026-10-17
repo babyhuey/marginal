@@ -30,10 +30,16 @@ class ReplyThread:
     replies: tuple[str, ...]
 
 
+# Ends every reply `marginal compact` posts to close a stale finding.
+RESOLVED_MARKER = "<!-- marginal:resolved -->"
+
+
 def is_marginal_comment(body: str | None) -> bool:
-    """Whether `body` is a finding marginal posted: it carries the
-    fingerprint marker, or opens with marginal's severity badge."""
-    return bool(body) and bool(_MARKER.search(body) or _BADGE.match(body))
+    """Whether `body` was posted by marginal: a finding (fingerprint marker or
+    severity badge) or a `marginal compact` resolution reply."""
+    return bool(body) and bool(
+        _MARKER.search(body) or _BADGE.match(body) or RESOLVED_MARKER in body
+    )
 
 
 def maintainer_replies(comments: Iterable[dict[str, object]]) -> list[ReplyThread]:
