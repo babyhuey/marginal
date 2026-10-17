@@ -24,6 +24,7 @@ def client(tmp_path, monkeypatch):
     with patch("marginal.cli.compact.GitHubClient") as cls:
         cls.return_value.get_pull_request_files.return_value = FILES
         cls.return_value.list_review_comments.return_value = []
+        cls.return_value.list_review_threads.return_value = []
         yield cls.return_value
 
 
@@ -203,3 +204,51 @@ def test_a_resolution_reply_is_not_mistaken_for_a_maintainer_reply():
     ]
 
     assert maintainer_replies(comments) == []
+
+
+def _thread(comment_id, resolved=False):
+    return {"id": f"PRRT_{comment_id}", "is_resolved": resolved, "comment_id": comment_id}
+
+
+def test_a_stale_finding_has_its_thread_resolved_after_the_reply(client, provider):
+    client.list_review_comments.return_value = [_finding(1), _finding(2, line=3)]
+    client.list_review_threads.return_value = [_thread(1), _thread(2)]
+    provider.generate_structured = _answers((1, False, "Fixed."), (2, True, "Unchanged."))
+
+    assert _compact("--comment") == 0
+
+    client.resolve_review_thread.assert_called_once_with("PRRT_1")
+    calls = [c[0] for c in client.method_calls]
+    assert calls.index("reply_to_review_comment") < calls.index("resolve_review_thread")
+
+
+def test_a_failed_thread_resolve_keeps_the_reply_and_the_run(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1)]
+    client.resolve_review_thread.side_effect = GitHubAPIError(200, "Resource not accessible")
+    provider.generate_structured = _answers((1, False, "Fixed."))
+
+    assert _compact("--comment") == 0
+
+    client.reply_to_review_comment.assert_called_once()
+    assert "replied on retry.py:2 but couldn't resolve its thread" in capsys.readouterr().err
+
+
+def test_a_thread_resolved_by_hand_counts_as_closed(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1, resolved=True)]
+
+    assert _compact("--comment") == 0
+
+    assert "No open marginal findings" in capsys.readouterr().out
+    provider.generate_structured.assert_not_called()
+
+
+def test_without_comment_no_thread_is_resolved(client, provider):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_review_threads.return_value = [_thread(1)]
+    provider.generate_structured = _answers((1, False, "Fixed."))
+
+    assert _compact() == 0
+
+    client.resolve_review_thread.assert_not_called()

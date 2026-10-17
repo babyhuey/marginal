@@ -61,7 +61,10 @@ def run_compact(repo: str, pr_number: int, path: str = ".", *, comment: bool = F
     out of its answer stays open.
 
     With `comment`, each resolved finding gets a reply in its thread ending in
-    `RESOLVED_MARKER`, so a later run skips it; without, nothing is posted.
+    `RESOLVED_MARKER`, so a later run skips it, and its thread is resolved
+    (collapsed in GitHub's UI). A failure to resolve is reported but doesn't
+    fail the run. A thread already resolved by hand counts as closed. Without
+    `comment`, nothing is posted.
     A PR with no open findings is a no-op that never calls the model.
 
     Errors follow `marginal review`'s contract: one stderr line and exit 1,
@@ -85,11 +88,15 @@ def run_compact(repo: str, pr_number: int, path: str = ".", *, comment: bool = F
     try:
         files = client.get_pull_request_files(pr_number)
         comments = client.list_review_comments(pr_number)
+        threads = client.list_review_threads(pr_number)
     except _GITHUB_ERRORS as exc:
         print(f"marginal compact: {exc}", file=sys.stderr)
         return 1
 
-    findings = _open_findings(comments)
+    # A thread someone already resolved in GitHub's UI counts as closed too.
+    closed_by_hand = {t["comment_id"] for t in threads if t["is_resolved"]}
+    thread_ids = {t["comment_id"]: t["id"] for t in threads}
+    findings = [c for c in _open_findings(comments) if c["id"] not in closed_by_hand]
     if not findings:
         print(f"{COMPACT_HEADING}\n\nNo open marginal findings on PR #{pr_number}.")
         return 0
@@ -129,16 +136,27 @@ def run_compact(repo: str, pr_number: int, path: str = ".", *, comment: bool = F
     print("\n".join(_summary_lines(pr_number, findings, verdicts)))
 
     if comment:
-        try:
-            for c in resolved:
+        for c in resolved:
+            try:
                 client.reply_to_review_comment(
                     pr_number,
                     c["id"],
                     f"✅ **Resolved**: {verdicts[c['id']].reason}\n\n{RESOLVED_MARKER}",
                 )
-        except _GITHUB_ERRORS as exc:
-            print(f"marginal compact: {exc}", file=sys.stderr)
-            return 1
+            except _GITHUB_ERRORS as exc:
+                print(f"marginal compact: {exc}", file=sys.stderr)
+                return 1
+            # Best-effort: the reply already records the resolution, so a token
+            # that can't resolve threads costs only the collapse, not the run.
+            try:
+                if c["id"] in thread_ids:
+                    client.resolve_review_thread(thread_ids[c["id"]])
+            except _GITHUB_ERRORS as exc:
+                print(
+                    f"marginal compact: replied on {_location(c)} but couldn't resolve "
+                    f"its thread: {exc}",
+                    file=sys.stderr,
+                )
     return 0
 
 
