@@ -29,6 +29,40 @@ pip install pre-commit
 pre-commit install
 ```
 
+## Changelog
+
+Don't edit `CHANGELOG.md` directly. Instead, add one file to `changelog.d/`
+named `<issue>.<type>.md`, where `<type>` is one of:
+
+| Type          | CHANGELOG section |
+|---------------|-------------------|
+| `breaking`    | Breaking Changes  |
+| `feature`     | New Features      |
+| `improvement` | Improvements      |
+| `fix`         | Fixes             |
+| `warning`     | Warnings          |
+
+The file holds the entry text, ending with a line that links the issue and
+PR and credits the PR author. For example, `changelog.d/77.feature.md`:
+
+```markdown
+Added `marginal help` and `marginal help <command>`, which print the usage
+for the whole CLI or for one subcommand
+
+([ISSUE-77](https://github.com/exactml/marginal/issues/77),
+[PR-78](https://github.com/exactml/marginal/pull/78) by [@HarshRajSinghania](https://github.com/HarshRajSinghania))
+```
+
+Don't know the PR number yet? Open the PR first, then fill it in. To preview
+how your entry will render in the next release:
+
+```bash
+towncrier build --draft --version next
+```
+
+At release time, `towncrier build` collects every fragment into a new
+`CHANGELOG.md` section and deletes them.
+
 ## Package layout
 
 ```text
