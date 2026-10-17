@@ -243,6 +243,32 @@ def test_pr_comment_reads_denied_without_read_permission(monkeypatch, method):
     session.request.assert_not_called()
 
 
+def test_reply_to_review_comment_posts_in_the_thread(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(201, {"id": 9})
+    client = _client(session=session)
+
+    client.reply_to_review_comment(7, 123, "done")
+
+    call = session.request.call_args
+    assert call.args == (
+        "POST",
+        "https://api.github.com/repos/acme/widgets/pulls/7/comments/123/replies",
+    )
+    assert call.kwargs["json"] == {"body": "done"}
+
+
+def test_reply_to_review_comment_denied_without_write_comments(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    client = _client(PermissionsConfig(write=PermissionsWrite(comments=False)), session)
+
+    with pytest.raises(PermissionDeniedError):
+        client.reply_to_review_comment(7, 123, "done")
+    session.request.assert_not_called()
+
+
 # -- API errors ---------------------------------------------------------
 
 

@@ -93,6 +93,18 @@ class GitHubClient:
         payload = {"body": body, "event": event, "comments": comments or []}
         return self._request("POST", f"/repos/{self._repo}/pulls/{number}/reviews", json=payload)
 
+    def reply_to_review_comment(self, number: int, comment_id: int, body: str) -> dict[str, object]:
+        """Post `body` as a reply in the thread of review comment `comment_id`.
+
+        Requires `permissions.write.comments`, like `create_review`.
+        """
+        self._require_write("comments")
+        return self._request(
+            "POST",
+            f"/repos/{self._repo}/pulls/{number}/comments/{comment_id}/replies",
+            json={"body": body},
+        )
+
     # -- internals ---------------------------------------------------------
 
     def _require_read(self, flag: str) -> None:
