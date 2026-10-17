@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import anthropic
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
+from marginal.providers.base import retry_once_on_validation_error
 from marginal.providers.credentials import require_env
 from marginal.providers.errors import ProviderAPIError, ProviderResponseError
 
@@ -160,8 +161,8 @@ class AnthropicProvider:
     ) -> BaseModel:
         max_tokens = kwargs.pop("max_tokens", DEFAULT_MAX_TOKENS)
         input_schema = _strict_input_schema(schema)
-        validation_error: ValidationError | None = None
-        for _ in range(2):
+
+        async def attempt() -> BaseModel:
             try:
                 response = await self._client.messages.create(
                     model=self._model,
@@ -186,14 +187,9 @@ class AnthropicProvider:
                     f"anthropic provider did not return the expected "
                     f"{_STRUCTURED_OUTPUT_TOOL!r} tool call"
                 )
-            try:
-                return schema.model_validate(tool_input)
-            except ValidationError as exc:
-                validation_error = exc
-        raise ProviderResponseError(
-            f"anthropic structured output failed schema validation after retrying once: "
-            f"{validation_error}"
-        ) from validation_error
+            return schema.model_validate(tool_input)
+
+        return await retry_once_on_validation_error("anthropic", attempt)
 
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         try:
