@@ -19,6 +19,24 @@ GITHUB_API_URL = "https://api.github.com"
 
 ReviewEvent = Literal["COMMENT", "REQUEST_CHANGES", "APPROVE"]
 
+# Review threads and their resolved state exist only in GitHub's GraphQL API.
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
+      }
+    }
+  }
+}
+"""
+
+_RESOLVE_THREAD_MUTATION = """
+mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }
+"""
+
 
 class GitHubClient:
     """Thin wrapper around the GitHub REST API for one `"owner/name"` repo.
@@ -70,6 +88,32 @@ class GitHubClient:
         self._require_read("pull_requests")
         return self._get_all_pages(f"/repos/{self._repo}/pulls/{number}/reviews")
 
+    def list_review_threads(self, number: int) -> list[dict[str, object]]:
+        """Return every review thread on the PR as `{"id", "is_resolved",
+        "comment_id"}`, where `comment_id` is the REST id of the thread's first
+        comment -- the id `list_review_comments` reports for it."""
+        self._require_read("pull_requests")
+        owner, name = self._repo.split("/", 1)
+        threads: list[dict[str, object]] = []
+        cursor = None
+        while True:
+            data = self._graphql(
+                _REVIEW_THREADS_QUERY,
+                {"owner": owner, "name": name, "number": number, "cursor": cursor},
+            )
+            page = data["repository"]["pullRequest"]["reviewThreads"]
+            threads += [
+                {
+                    "id": node["id"],
+                    "is_resolved": node["isResolved"],
+                    "comment_id": next((c["databaseId"] for c in node["comments"]["nodes"]), None),
+                }
+                for node in page["nodes"]
+            ]
+            if not page["pageInfo"]["hasNextPage"]:
+                return threads
+            cursor = page["pageInfo"]["endCursor"]
+
     # -- writes ----------------------------------------------------------------
 
     def create_review(
@@ -105,6 +149,12 @@ class GitHubClient:
             json={"body": body},
         )
 
+    def resolve_review_thread(self, thread_id: str) -> None:
+        """Mark review thread `thread_id` resolved, as the "Resolve conversation"
+        button does. Requires `permissions.write.comments`."""
+        self._require_write("comments")
+        self._graphql(_RESOLVE_THREAD_MUTATION, {"id": thread_id})
+
     # -- internals ---------------------------------------------------------
 
     def _require_read(self, flag: str) -> None:
@@ -125,6 +175,14 @@ class GitHubClient:
                 break
             page += 1
         return items
+
+    def _graphql(self, query: str, variables: dict[str, object]) -> dict[str, object]:
+        # GraphQL reports failures as HTTP 200 with an `errors` list.
+        result = self._request("POST", "/graphql", json={"query": query, "variables": variables})
+        if result.get("errors"):
+            messages = "; ".join(str(e.get("message", e)) for e in result["errors"])
+            raise GitHubAPIError(200, messages)
+        return result["data"]
 
     def _request(
         self,
