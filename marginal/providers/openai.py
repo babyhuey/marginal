@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import openai
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
+from marginal.providers.base import retry_once_on_validation_error
 from marginal.providers.credentials import require_env
 from marginal.providers.errors import ProviderAPIError, ProviderResponseError
 
@@ -34,8 +35,7 @@ class OpenAIProvider:
     async def generate_structured(
         self, prompt: str, schema: type[BaseModel], **kwargs: object
     ) -> BaseModel:
-        validation_error: ValidationError | None = None
-        for _ in range(2):
+        async def attempt() -> BaseModel:
             try:
                 response = await self._client.chat.completions.create(
                     model=self._model,
@@ -55,14 +55,9 @@ class OpenAIProvider:
             content = response.choices[0].message.content
             if content is None:
                 raise ProviderResponseError("openai provider returned no structured-output content")
-            try:
-                return schema.model_validate_json(content)
-            except ValidationError as exc:
-                validation_error = exc
-        raise ProviderResponseError(
-            f"openai structured output failed schema validation after retrying once: "
-            f"{validation_error}"
-        ) from validation_error
+            return schema.model_validate_json(content)
+
+        return await retry_once_on_validation_error("openai", attempt)
 
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         try:

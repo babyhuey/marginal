@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from marginal.providers.errors import ProviderResponseError
 
 
 @runtime_checkable
@@ -28,3 +30,23 @@ class ModelProvider(Protocol):
     def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         """Stream a text completion for `prompt` as it's generated."""
         ...
+
+
+async def retry_once_on_validation_error(
+    provider: str, attempt: Callable[[], Awaitable[BaseModel]]
+) -> BaseModel:
+    """Await `attempt()`, calling it once more if its output fails schema validation.
+
+    A second `ValidationError` becomes a `ProviderResponseError`; any other
+    error from `attempt` propagates on the first try, unretried.
+    """
+    validation_error: ValidationError | None = None
+    for _ in range(2):
+        try:
+            return await attempt()
+        except ValidationError as exc:
+            validation_error = exc
+    raise ProviderResponseError(
+        f"{provider} structured output failed schema validation after retrying once: "
+        f"{validation_error}"
+    ) from validation_error
