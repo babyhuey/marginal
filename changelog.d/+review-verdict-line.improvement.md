@@ -7,4 +7,4 @@ the PR. A run without a reviewer model shows no verdict, so it never claims
 "no issues" for a diff nobody reviewed. The base and head SHAs in the header
 are shortened to 7 characters
 
-([PR-XX](https://github.com/exactml/marginal/pull/XX) by [@exactml](https://github.com/exactml))
+([PR-117](https://github.com/exactml/marginal/pull/117) by [@exactml](https://github.com/exactml))
