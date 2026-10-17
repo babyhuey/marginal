@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from marginal.cli.help import run_help
 from marginal.cli.init import run_init
 from marginal.cli.review import run_review
 
@@ -30,8 +31,15 @@ def main(argv: list[str] | None = None) -> int:
         "--comment", action="store_true", help="Post the summary as a PR comment"
     )
 
+    help_parser = subparsers.add_parser("help", help="Show help for a command")
+    help_parser.add_argument(
+        "topic", nargs="?", help="Command to show help for (default: top-level usage)"
+    )
+
     args = parser.parse_args(argv)
 
+    if args.command == "help":
+        return run_help(parser, subparsers, args.topic)
     if args.command == "init":
         return run_init(args.path, force=args.force)
     if args.command == "review":
