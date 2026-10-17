@@ -26,6 +26,7 @@ from marginal.cli.review import (
     _redact_patches,
     _redacted_filenames,
     _redaction_warning_lines,
+    _verdict,
     run_review,
 )
 from marginal.config import MarginalConfig, load_config
@@ -603,6 +604,8 @@ def test_review_with_anchored_finding_posts_it_as_inline_comment(
     expected_body = "\n".join(
         [
             "### 🤖 marginal review",
+            "",
+            "**1 finding** · 🟠 1 high",
             "",
             "**PR #42: Fix flaky retry logic** · open · `abc123` → `def456` · 1 file changed",
             "",
@@ -2153,3 +2156,90 @@ def test_review_format_json_reports_the_prompt_within_budget(
     result = json.loads(capsys.readouterr().out)
     assert result["prompt_over_budget"] is False
     assert len(result["findings"]) == 1
+
+
+# -- review: verdict line --------------------------------------------------
+
+
+def _finding_of(severity):
+    return Finding(file="a.py", line=1, severity=severity, confidence=0.9, message="x")
+
+
+def test_verdict_counts_findings_by_severity_most_serious_first():
+    findings = [
+        _finding_of(Severity.MEDIUM),
+        _finding_of(Severity.CRITICAL),
+        _finding_of(Severity.HIGH),
+        _finding_of(Severity.HIGH),
+    ]
+
+    assert _verdict(findings) == "**4 findings** · 🔴 1 critical · 🟠 2 high · 🟡 1 medium"
+
+
+def test_verdict_with_one_finding_is_singular():
+    assert _verdict([_finding_of(Severity.LOW)]) == "**1 finding** · ⚪ 1 low"
+
+
+def test_verdict_with_no_findings_says_so():
+    assert _verdict([]) == "✅ **No issues found**"
+
+
+def test_verdict_mentions_findings_already_flagged_earlier():
+    assert _verdict([_finding_of(Severity.MEDIUM)], already_posted=2) == (
+        "**1 finding** · 🟡 1 medium · 2 already flagged earlier on this PR"
+    )
+    assert _verdict([], already_posted=2) == (
+        "✅ **No new issues** · 2 already flagged earlier on this PR"
+    )
+
+
+def test_review_with_no_findings_leads_with_no_issues_found(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, [], [])
+
+    body = mock_github_client.return_value.create_review.call_args.args[1]
+    assert body.startswith("### 🤖 marginal review\n\n✅ **No issues found**\n\n**PR #42")
+
+
+def test_review_without_a_reviewer_model_gives_no_verdict(
+    tmp_path, capsys, monkeypatch, mock_github_client
+):
+    """Nothing was reviewed, so it must not claim "no issues found"."""
+    monkeypatch.chdir(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = _pull_request()
+    client.get_pull_request_files.return_value = [{"filename": "a.py"}]
+
+    assert main(["review", "--repo", "acme/widgets", "--pr", "42"]) == 0
+
+    out = capsys.readouterr().out
+    assert "No issues found" not in out
+    assert "finding" not in out
+
+
+def test_base_lines_shortens_shas_to_seven_characters():
+    pull_request = {
+        "title": "t",
+        "state": "open",
+        "base": {"sha": "22e1206bdd694ad1579ffb69d9bb942da71605ef"},
+        "head": {"sha": "f6bbd55fefc17e63e6c5ed1b57794982aea8ee56"},
+    }
+
+    assert "`22e1206` → `f6bbd55`" in _base_lines(1, pull_request, [])[2]
+
+
+def test_review_over_the_prompt_budget_gives_no_verdict(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    """The model never ran, so the review must not claim "no issues found"."""
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config_with_budget(tmp_path, 1)
+
+    assert _run_budgeted_review(mock_github_client, mock_provider) == 0
+
+    out = capsys.readouterr().out
+    assert "⚠️ **Review skipped**" in out
+    assert "No issues found" not in out

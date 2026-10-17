@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -270,7 +271,11 @@ def run_review(
         max_comments=config.review.max_comments,
     )
 
-    base_lines = _base_lines(pr_number, pull_request, filenames)
+    # Without a model call nothing was reviewed, so there's no verdict to give.
+    reviewed = reviewer_model is not None and over_budget is None
+    base_lines = _base_lines(
+        pr_number, pull_request, filenames, _verdict(findings) if reviewed else None
+    )
     warning_lines = (
         _budget_warning_lines(over_budget)
         + _redaction_warning_lines(redacted_files)
@@ -302,8 +307,9 @@ def run_review(
                 )
             already_reviewed = any(REVIEW_HEADING in (r.get("body") or "") for r in reviews)
             if new_findings or not already_reviewed or over_budget is not None:
+                verdict = _verdict(new_findings, already_posted=len(findings) - len(new_findings))
                 body = "\n".join(
-                    base_lines
+                    _base_lines(pr_number, pull_request, filenames, verdict if reviewed else None)
                     + warning_lines
                     + [
                         line
@@ -348,20 +354,29 @@ def run_review(
     return 0
 
 
-def _base_lines(pr_number: int, pull_request: dict[str, object], filenames: list[str]) -> list[str]:
-    """Render the review header: a title line plus a collapsed file list.
+def _base_lines(
+    pr_number: int,
+    pull_request: dict[str, object],
+    filenames: list[str],
+    verdict: str | None = None,
+) -> list[str]:
+    """Render the review header: the `verdict` line (if any), a title line,
+    and a collapsed file list.
 
-    The file list sits behind a `<details>` block so it doesn't dominate the
-    review on larger PRs -- expanding it is one click, not a wall of text.
+    The verdict leads so the outcome is readable without opening a single
+    inline thread. The file list sits behind a `<details>` block so it
+    doesn't dominate the review on larger PRs -- expanding it is one click,
+    not a wall of text.
     """
     file_word = "file" if len(filenames) == 1 else "files"
-    lines = [
-        REVIEW_HEADING,
-        "",
+    lines = [REVIEW_HEADING, ""]
+    if verdict is not None:
+        lines += [verdict, ""]
+    lines.append(
         f"**PR #{pr_number}: {pull_request['title']}** · {pull_request['state']} · "
-        f"`{pull_request['base']['sha']}` → `{pull_request['head']['sha']}` · "
-        f"{len(filenames)} {file_word} changed",
-    ]
+        f"`{str(pull_request['base']['sha'])[:7]}` → `{str(pull_request['head']['sha'])[:7]}` · "
+        f"{len(filenames)} {file_word} changed"
+    )
     if filenames:
         lines += [
             "",
@@ -373,6 +388,28 @@ def _base_lines(pr_number: int, pull_request: dict[str, object], filenames: list
             "</details>",
         ]
     return lines
+
+
+def _verdict(findings: list[Finding], *, already_posted: int = 0) -> str:
+    """One line summing up a review's findings by severity, most serious first,
+    e.g. `**3 findings** · 🔴 1 critical · 🟠 2 high`, or that there were none.
+
+    `already_posted` counts findings left out because an earlier run on this
+    PR already flagged them, so "nothing new" isn't read as "nothing wrong".
+    """
+    if findings:
+        counts = Counter(finding.severity for finding in findings)
+        noun = "finding" if len(findings) == 1 else "findings"
+        verdict = f"**{len(findings)} {noun}** · " + " · ".join(
+            f"{emoji} {counts[severity]} {severity.value}"
+            for severity, emoji in SEVERITY_EMOJI.items()
+            if counts[severity]
+        )
+    else:
+        verdict = "✅ **No new issues**" if already_posted else "✅ **No issues found**"
+    if already_posted:
+        verdict += f" · {already_posted} already flagged earlier on this PR"
+    return verdict
 
 
 def _finding_badge(finding: Finding, *, with_location: bool) -> str:
