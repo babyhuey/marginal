@@ -71,6 +71,7 @@ class ModelSpec(BaseModel):
 
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    base_url: str | None = None
 
 
 class PermissionsRead(BaseModel):

@@ -206,6 +206,20 @@ anti_policies:   # deliberate tradeoffs marginal must never flag
 
 API keys are never stored in configuration — only in your CI secrets or environment. See the full [specification](docs/REQUIREMENTS.md) for every option.
 
+### Local models (Ollama)
+
+To keep every model call on your own machines, run the model with [Ollama](https://ollama.com) and point a role at it. No API key is needed:
+
+```yaml
+models:
+  reviewer:
+    provider: ollama
+    model: qwen2.5-coder:14b
+    base_url: http://localhost:11434/v1  # the default; set it for a remote Ollama host
+```
+
+`ollama` talks to Ollama's OpenAI-compatible API, so any server exposing `/v1/chat/completions` with JSON-schema structured output (vLLM, for example) works the same way. Install it with `pip install 'marginal-review[ollama]'`. The machine running marginal must reach that URL, so in GitHub Actions that usually means a self-hosted runner on the same network.
+
 ## Run it anywhere
 
 The same core agent runs as:

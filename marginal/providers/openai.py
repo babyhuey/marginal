@@ -1,4 +1,4 @@
-"""`ModelProvider` backed by the OpenAI Chat Completions API."""
+"""`ModelProvider`s backed by the OpenAI Chat Completions API or a compatible server."""
 
 from __future__ import annotations
 
@@ -11,14 +11,24 @@ from marginal.providers.base import retry_once_on_validation_error
 from marginal.providers.credentials import require_env
 from marginal.providers.errors import ProviderAPIError, ProviderResponseError
 
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
+
 
 class OpenAIProvider:
     """`ModelProvider` for a single OpenAI (or Codex) model."""
 
-    def __init__(self, model: str, *, client: openai.AsyncOpenAI | None = None) -> None:
+    _name = "openai"
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        client: openai.AsyncOpenAI | None = None,
+    ) -> None:
         self._model = model
         self._client = client or openai.AsyncOpenAI(
-            api_key=require_env("OPENAI_API_KEY", provider="openai")
+            api_key=require_env("OPENAI_API_KEY", provider="openai"), base_url=base_url
         )
 
     async def generate(self, prompt: str, **kwargs: object) -> str:
@@ -29,7 +39,7 @@ class OpenAIProvider:
                 **kwargs,
             )
         except openai.APIError as exc:
-            raise ProviderAPIError("openai", str(exc)) from exc
+            raise ProviderAPIError(self._name, str(exc)) from exc
         return response.choices[0].message.content or ""
 
     async def generate_structured(
@@ -51,13 +61,15 @@ class OpenAIProvider:
                     **kwargs,
                 )
             except openai.APIError as exc:
-                raise ProviderAPIError("openai", str(exc)) from exc
+                raise ProviderAPIError(self._name, str(exc)) from exc
             content = response.choices[0].message.content
             if content is None:
-                raise ProviderResponseError("openai provider returned no structured-output content")
+                raise ProviderResponseError(
+                    f"{self._name} provider returned no structured-output content"
+                )
             return schema.model_validate_json(content)
 
-        return await retry_once_on_validation_error("openai", attempt)
+        return await retry_once_on_validation_error(self._name, attempt)
 
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         try:
@@ -72,4 +84,26 @@ class OpenAIProvider:
                 if delta:
                     yield delta
         except openai.APIError as exc:
-            raise ProviderAPIError("openai", str(exc)) from exc
+            raise ProviderAPIError(self._name, str(exc)) from exc
+
+
+class OllamaProvider(OpenAIProvider):
+    """`ModelProvider` for a model served by Ollama (or another OpenAI-compatible
+    local server such as vLLM), needing no API key."""
+
+    _name = "ollama"
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        client: openai.AsyncOpenAI | None = None,
+    ) -> None:
+        # The SDK refuses an empty key and would otherwise fall back to
+        # OPENAI_API_KEY, sending a real cloud key to the local server.
+        super().__init__(
+            model,
+            client=client
+            or openai.AsyncOpenAI(api_key="ollama", base_url=base_url or DEFAULT_OLLAMA_BASE_URL),
+        )

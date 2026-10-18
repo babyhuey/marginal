@@ -136,10 +136,16 @@ def _nullable_type(node: dict) -> str | None:
 class AnthropicProvider:
     """`ModelProvider` for a single Claude model."""
 
-    def __init__(self, model: str, *, client: anthropic.AsyncAnthropic | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        client: anthropic.AsyncAnthropic | None = None,
+    ) -> None:
         self._model = model
         self._client = client or anthropic.AsyncAnthropic(
-            api_key=require_env("ANTHROPIC_API_KEY", provider="anthropic")
+            api_key=require_env("ANTHROPIC_API_KEY", provider="anthropic"), base_url=base_url
         )
 
     async def generate(self, prompt: str, **kwargs: object) -> str:
