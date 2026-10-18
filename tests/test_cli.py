@@ -1946,8 +1946,11 @@ def _reply(id, to, body, user=_MAINTAINER):
     return {"id": id, "in_reply_to_id": to, "body": body, "user": user, "path": "marginal/retry.py"}
 
 
-def _prompt_with_comments(tmp_path, monkeypatch, mock_github_client, mock_provider, comments):
-    """Run `marginal review` (no `--comment`) over `comments`; return its prompt."""
+def _prompt_with_comments(
+    tmp_path, monkeypatch, mock_github_client, mock_provider, comments, reviews=(), pr_comments=()
+):
+    """Run `marginal review` (no `--comment`) over `comments` (inline), `reviews`
+    and `pr_comments` (the PR's conversation); return its prompt."""
     monkeypatch.chdir(tmp_path)
     client = mock_github_client.return_value
     client.reset_mock()
@@ -1956,6 +1959,8 @@ def _prompt_with_comments(tmp_path, monkeypatch, mock_github_client, mock_provid
         {"filename": "marginal/retry.py", "patch": _RETRY_PATCH}
     ]
     client.list_review_comments.return_value = comments
+    client.list_reviews.return_value = list(reviews)
+    client.list_issue_comments.return_value = list(pr_comments)
     provider = mock_provider.return_value
     provider.generate_structured = AsyncMock(return_value=_FindingsResponse(findings=[]))
     assert main(["review", "--repo", "acme/widgets", "--pr", "42"]) == 0
@@ -2013,6 +2018,119 @@ def test_review_prompt_is_unchanged_without_maintainer_replies(
     assert unanswered == baseline
     assert answered_by_a_bot == baseline
     assert reply_to_a_human == baseline
+
+
+def _body_findings_review(*messages, at="2026-10-17T15:01:10Z"):
+    """A marginal review posting `messages` as line-less findings in its body."""
+    lines = [REVIEW_HEADING]
+    for n, message in enumerate(messages):
+        finding = Finding(
+            file="marginal/retry.py",
+            line=None,
+            severity=Severity.HIGH,
+            confidence=0.9,
+            message=message,
+        )
+        lines += ["", _finding_badge(finding, with_location=True), "", message]
+        lines.append(fingerprint_marker(f"{n:016x}"))
+    return {"body": "\n".join(lines), "user": _MARGINAL_BOT, "submitted_at": at}
+
+
+def _pr_comment(body, at="2026-10-17T15:02:25Z", user=_MAINTAINER):
+    return {"body": body, "user": user, "created_at": at}
+
+
+def test_review_folds_a_pr_comment_answering_a_body_finding_into_the_prompt(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+
+    prompt = _prompt_with_comments(
+        tmp_path,
+        monkeypatch,
+        mock_github_client,
+        mock_provider,
+        [],
+        reviews=[_body_findings_review("The retry loop has no attempt cap.")],
+        pr_comments=[_pr_comment("False positive: retry() caps attempts itself.")],
+    )
+
+    assert "A maintainer already answered" in prompt
+    assert "--- marginal/retry.py ---" in prompt
+    assert "The retry loop has no attempt cap." in prompt
+    assert "False positive: retry() caps attempts itself." in prompt
+    assert "marginal:finding:" not in prompt
+
+
+def test_review_prompt_is_unchanged_without_an_answer_to_a_body_finding(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+    run = (tmp_path, monkeypatch, mock_github_client, mock_provider, [])
+    review = _body_findings_review("No attempt cap.")
+
+    baseline = _prompt_with_comments(*run)
+    unanswered = _prompt_with_comments(*run, reviews=[review])
+    not_answers = _prompt_with_comments(
+        *run,
+        reviews=[review],
+        pr_comments=[
+            _pr_comment("Posted before marginal reviewed.", at="2026-10-17T15:00:00Z"),
+            _pr_comment("Deployed to staging.", user=_MARGINAL_BOT),
+            _pr_comment(review["body"]),
+        ],
+    )
+    no_body_findings = _prompt_with_comments(
+        *run,
+        reviews=[{**review, "body": REVIEW_HEADING}],
+        pr_comments=[_pr_comment("Thanks!")],
+    )
+
+    assert unanswered == baseline
+    assert not_answers == baseline
+    assert no_body_findings == baseline
+
+
+def test_review_caps_answered_body_findings_like_inline_threads(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+
+    prompt = _prompt_with_comments(
+        tmp_path,
+        monkeypatch,
+        mock_github_client,
+        mock_provider,
+        [],
+        reviews=[_body_findings_review(*(f"point {n}" for n in range(MAX_REPLY_THREADS + 5)))],
+        pr_comments=[_pr_comment("r" * 5000)],
+    )
+
+    assert prompt.count("marginal's earlier comment:") == MAX_REPLY_THREADS
+    assert "r" * 1501 not in prompt
+
+
+@pytest.mark.parametrize("method", ["list_reviews", "list_issue_comments"])
+def test_review_fails_cleanly_when_reading_the_pr_conversation_fails(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider, method
+):
+    _write_reviewer_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = _pull_request()
+    client.get_pull_request_files.return_value = []
+    client.list_review_comments.return_value = []
+    getattr(client, method).side_effect = GitHubAPIError(500, "Internal Server Error")
+    mock_provider.return_value.generate_structured = AsyncMock(
+        return_value=_FindingsResponse(findings=[])
+    )
+
+    exit_code = main(["review", "--repo", "acme/widgets", "--pr", "42"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("marginal review:") and err.count("\n") == 1
+    mock_provider.return_value.generate_structured.assert_not_called()
 
 
 def test_build_replies_section_keeps_only_the_most_recent_threads_and_clips_them():
