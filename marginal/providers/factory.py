@@ -42,4 +42,4 @@ def get_provider(spec: ModelSpec) -> ModelProvider:
         ) from exc
 
     provider_cls = getattr(module, class_name)
-    return provider_cls(spec.model)
+    return provider_cls(spec.model, base_url=spec.base_url)

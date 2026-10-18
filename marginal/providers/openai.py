@@ -15,10 +15,16 @@ from marginal.providers.errors import ProviderAPIError, ProviderResponseError
 class OpenAIProvider:
     """`ModelProvider` for a single OpenAI (or Codex) model."""
 
-    def __init__(self, model: str, *, client: openai.AsyncOpenAI | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        base_url: str | None = None,
+        client: openai.AsyncOpenAI | None = None,
+    ) -> None:
         self._model = model
         self._client = client or openai.AsyncOpenAI(
-            api_key=require_env("OPENAI_API_KEY", provider="openai")
+            api_key=require_env("OPENAI_API_KEY", provider="openai"), base_url=base_url
         )
 
     async def generate(self, prompt: str, **kwargs: object) -> str:

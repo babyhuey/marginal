@@ -93,6 +93,21 @@ def test_get_provider_resolves_openai(monkeypatch):
     assert isinstance(provider, OpenAIProvider)
 
 
+def test_get_provider_passes_base_url_to_the_sdk_client(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    openai_provider = get_provider(
+        ModelSpec(provider="openai", model="codex", base_url="http://gpu-box:8000/v1")
+    )
+    anthropic_provider = get_provider(
+        ModelSpec(provider="anthropic", model="claude-sonnet", base_url="http://proxy:9000")
+    )
+
+    assert str(openai_provider._client.base_url) == "http://gpu-box:8000/v1/"
+    assert str(anthropic_provider._client.base_url) == "http://proxy:9000"
+
+
 # -- AnthropicProvider ------------------------------------------------------
 
 
