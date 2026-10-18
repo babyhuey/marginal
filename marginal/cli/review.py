@@ -141,7 +141,10 @@ def run_review(
     recognizable secret shape never reaches the model with that value intact
     -- plus the content of any `config.policies` files (loaded via
     `marginal.policy.load_policies`, relative to `path`; a missing file is
-    skipped with a warning rather than failing the review), then runs the
+    skipped with a warning rather than failing the review) and, under a
+    separate "never flag" instruction, any `config.anti_policies` files
+    (loaded the same way) describing deliberate tradeoffs the repo doesn't
+    want re-litigated, then runs the
     list through `marginal.review.filter_findings`: each finding is dropped
     outright if its self-reported `confidence` is below
     `config.review.confidence_threshold`, and the survivors are capped at
@@ -246,6 +249,7 @@ def run_review(
     over_budget: _PromptOverBudget | None = None
     if reviewer_model is not None:
         policies = load_policies(path, config.policies)
+        anti_policies = load_policies(path, config.anti_policies)
         redacted = _redact_patches(files)
         redacted_files = _redacted_filenames(files, redacted)
         coverage_lines = _coverage_warning_lines(pull_request, files)
@@ -261,6 +265,7 @@ def run_review(
                     path,
                     replies,
                     max_prompt_tokens=config.review.max_prompt_tokens,
+                    anti_policies=anti_policies,
                 )
             )
         except _PromptOverBudget as exc:
@@ -604,15 +609,19 @@ async def _generate_findings(
     replies: list[ReplyThread],
     *,
     max_prompt_tokens: int,
+    anti_policies: list[tuple[str, str]] | None = None,
 ) -> list[Finding]:
     """Generate a bounded list of unvalidated `Finding`s from `model_spec` over
-    `files`' diffs, `policies`, `graph_context`, and maintainer `replies`.
+    `files`' diffs, `policies`, `graph_context`, maintainer `replies`, and
+    `anti_policies`.
 
     Raises `_PromptOverBudget` without touching the provider if the built
     prompt is estimated over `max_prompt_tokens`. The check runs on the final
     prompt string, so every section the builder adds counts toward the cap.
     """
-    prompt = _build_finding_prompt(files, policies, graph_context, repo_root, replies)
+    prompt = _build_finding_prompt(
+        files, policies, graph_context, repo_root, replies, anti_policies
+    )
     estimated_tokens = _estimate_tokens(prompt)
     if estimated_tokens > max_prompt_tokens:
         raise _PromptOverBudget(
@@ -734,6 +743,7 @@ def _build_finding_prompt(
     graph_context: list[ChangedDefinition],
     repo_root: str,
     replies: list[ReplyThread] | None = None,
+    anti_policies: list[tuple[str, str]] | None = None,
 ) -> str:
     """The reviewer prompt. `files` must already be `_redact_patches` output."""
     diff = "\n\n".join(f"--- {file['filename']} ---\n{file['patch']}" for file in files)
@@ -744,6 +754,16 @@ def _build_finding_prompt(
             "Also weigh the diff against this repository's own engineering policies "
             "below -- a violation of one of these is at least as important as a "
             f"general code-quality issue:\n\n{policy_text}"
+        )
+    if anti_policies:
+        anti_policy_text = "\n\n".join(
+            f"--- {path} ---\n{content}" for path, content in anti_policies
+        )
+        sections.append(
+            "Never flag anything that this repository's anti-policies below describe "
+            "-- each is a deliberate, accepted decision the maintainers don't want "
+            "raised in review. Leave such issues out of your findings entirely, even "
+            f"if they would otherwise look like a problem:\n\n{anti_policy_text}"
         )
     graph_section = _build_graph_context_section(graph_context, repo_root)
     if graph_section:
