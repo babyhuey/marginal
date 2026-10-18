@@ -15,6 +15,8 @@ from marginal.providers.errors import ProviderAPIError, ProviderResponseError
 class OpenAIProvider:
     """`ModelProvider` for a single OpenAI (or Codex) model."""
 
+    _name = "openai"
+
     def __init__(
         self,
         model: str,
@@ -35,7 +37,7 @@ class OpenAIProvider:
                 **kwargs,
             )
         except openai.APIError as exc:
-            raise ProviderAPIError("openai", str(exc)) from exc
+            raise ProviderAPIError(self._name, str(exc)) from exc
         return response.choices[0].message.content or ""
 
     async def generate_structured(
@@ -57,13 +59,15 @@ class OpenAIProvider:
                     **kwargs,
                 )
             except openai.APIError as exc:
-                raise ProviderAPIError("openai", str(exc)) from exc
+                raise ProviderAPIError(self._name, str(exc)) from exc
             content = response.choices[0].message.content
             if content is None:
-                raise ProviderResponseError("openai provider returned no structured-output content")
+                raise ProviderResponseError(
+                    f"{self._name} provider returned no structured-output content"
+                )
             return schema.model_validate_json(content)
 
-        return await retry_once_on_validation_error("openai", attempt)
+        return await retry_once_on_validation_error(self._name, attempt)
 
     async def stream(self, prompt: str, **kwargs: object) -> AsyncIterator[str]:
         try:
@@ -78,4 +82,4 @@ class OpenAIProvider:
                 if delta:
                     yield delta
         except openai.APIError as exc:
-            raise ProviderAPIError("openai", str(exc)) from exc
+            raise ProviderAPIError(self._name, str(exc)) from exc
