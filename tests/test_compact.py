@@ -25,6 +25,7 @@ def client(tmp_path, monkeypatch):
         cls.return_value.get_pull_request_files.return_value = FILES
         cls.return_value.list_review_comments.return_value = []
         cls.return_value.list_review_threads.return_value = []
+        cls.return_value.list_issue_comments.return_value = []
         yield cls.return_value
 
 
@@ -41,15 +42,26 @@ def _finding(id, line=2, path="retry.py", message="time.sleep blocks the event l
         "line": line,
         "body": f"🟠 **High** · 90% confidence\n\n{message}\n\n{fingerprint_marker('0' * 16)}",
         "user": {"login": "github-actions[bot]", "type": "Bot"},
+        "created_at": "2026-10-18T10:00:00Z",
     }
 
 
 def _answers(*results):
     return AsyncMock(
         return_value=_RecheckResponse(
-            results=[_Recheck(id=id, still_applies=ok, reason=why) for id, ok, why in results]
+            results=[
+                _Recheck(id=r[0], still_applies=r[1], reason=r[2], dismissed_by=(r + (None,))[3])
+                for r in results
+            ]
         )
     )
+
+
+def _person(id, body, login="alice", at="2026-10-18T11:00:00Z", reply_to=None, kind="User"):
+    comment = {"id": id, "body": body, "user": {"login": login, "type": kind}, "created_at": at}
+    if reply_to is not None:
+        comment["in_reply_to_id"] = reply_to
+    return comment
 
 
 def _compact(*args):
@@ -252,3 +264,99 @@ def test_without_comment_no_thread_is_resolved(client, provider):
     assert _compact() == 0
 
     client.resolve_review_thread.assert_not_called()
+
+
+# -- dismissal by a person's comment ---------------------------------------
+
+
+def test_a_reply_disputing_the_finding_closes_it_and_credits_the_person(client, provider, capsys):
+    client.list_review_comments.return_value = [
+        _finding(1),
+        _person(5, "This is a false positive: retry runs in a worker thread.", reply_to=1),
+    ]
+    client.list_review_threads.return_value = [
+        {"id": "PRRT_1", "is_resolved": False, "comment_id": 1}
+    ]
+    provider.generate_structured = _answers((1, True, "Still calls time.sleep.", 5))
+
+    assert _compact("--comment") == 0
+
+    body = client.reply_to_review_comment.call_args.args[2]
+    assert body.startswith(
+        "✅ **Resolved**: @alice says this isn't an issue (\"This is a false positive: retry "
+        'runs in a worker thread."), so marginal is closing it.'
+    )
+    client.resolve_review_thread.assert_called_once_with("PRRT_1")
+    assert "dismissed in comment 5" in capsys.readouterr().out
+
+
+def test_a_pr_comment_disputing_an_inline_finding_closes_it(client, provider):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_issue_comments.return_value = [
+        _person(9, "marginal's note on retry.py's sleep is wrong -- it's intentional.", login="bob")
+    ]
+    provider.generate_structured = _answers((1, True, "Unchanged.", 9))
+
+    assert _compact("--comment") == 0
+
+    assert "@bob says this isn't an issue" in client.reply_to_review_comment.call_args.args[2]
+
+
+def test_lgtm_dismisses_nothing(client, provider, capsys):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_issue_comments.return_value = [_person(9, "LGTM")]
+    provider.generate_structured = _answers((1, True, "Unchanged.", None))
+
+    assert _compact("--comment") == 0
+
+    client.reply_to_review_comment.assert_not_called()
+    assert "⏳ 1 still open" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "comment",
+    [
+        _person(9, "False positive.", login="ci-bot", kind="Bot"),
+        _person(9, "False positive.", at="2026-10-18T09:00:00Z"),
+    ],
+    ids=["from a bot", "before the finding"],
+)
+def test_a_dismissal_naming_an_ineligible_comment_is_ignored(client, provider, comment):
+    client.list_review_comments.return_value = [_finding(1)]
+    client.list_issue_comments.return_value = [comment]
+    provider.generate_structured = _answers((1, True, "Unchanged.", 9))
+
+    assert _compact("--comment") == 0
+
+    client.reply_to_review_comment.assert_not_called()
+
+
+def test_a_dismissal_naming_an_unknown_comment_is_ignored(client, provider):
+    client.list_review_comments.return_value = [_finding(1)]
+    provider.generate_structured = _answers((1, True, "Unchanged.", 12345))
+
+    assert _compact("--comment") == 0
+
+    client.reply_to_review_comment.assert_not_called()
+
+
+def test_the_prompt_shows_each_findings_replies_and_the_later_pr_comments(client, provider):
+    client.list_review_comments.return_value = [
+        _finding(1),
+        _person(5, "Intentional, see the docstring.", reply_to=1),
+        _person(6, "ack", login="github-actions[bot]", kind="Bot", reply_to=1),
+    ]
+    client.list_issue_comments.return_value = [
+        _person(8, "Too early to count.", at="2026-10-18T09:00:00Z"),
+        _person(9, "LGTM", login="bob"),
+    ]
+    provider.generate_structured = _answers((1, True, "Unchanged."))
+
+    _compact()
+
+    prompt = provider.generate_structured.call_args.args[0]
+    finding = prompt.index("--- finding 1 at retry.py:2 ---")
+    assert prompt.index("reply 5 by @alice: Intentional, see the docstring.") > finding
+    assert "Other pull request comments:\n\ncomment 9 by @bob: LGTM" in prompt
+    assert "Too early to count." not in prompt
+    assert "ack" not in prompt.split("Current diff:")[0]
