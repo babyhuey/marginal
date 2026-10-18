@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from marginal.cli import main
 from marginal.cli.init import WORKFLOW_TEMPLATE
 from marginal.cli.review import (
+    FINDING_PROMPT_INSTRUCTIONS,
     MAX_FINDINGS_PER_REVIEW,
     MAX_GRAPH_CONTEXT_CALLERS,
     MAX_REPLY_THREADS,
@@ -972,7 +973,7 @@ def test_review_with_missing_credentials_maps_to_exit_code_3(
     client.create_review.assert_not_called()
 
 
-def _write_reviewer_config_with_policies(tmp_path, policy_paths):
+def _write_reviewer_config_with_policies(tmp_path, policy_paths, key="policies"):
     config_dir = tmp_path / ".marginal"
     config_dir.mkdir()
     policies_yaml = "\n".join(f"  - {policy_path}" for policy_path in policy_paths)
@@ -982,7 +983,7 @@ def _write_reviewer_config_with_policies(tmp_path, policy_paths):
         "  reviewer:\n"
         "    provider: anthropic\n"
         "    model: claude-3-5-sonnet\n"
-        "policies:\n" + policies_yaml + "\n"
+        f"{key}:\n" + policies_yaml + "\n"
     )
 
 
@@ -1053,6 +1054,79 @@ def test_review_with_a_missing_policy_file_does_not_crash(
     assert ".marginal/policies/missing.md" in err
     prompt = provider.generate_structured.call_args.args[0]
     assert "missing.md" not in prompt
+
+
+# -- review: anti-policy prompt folding -------------------------------------
+
+
+_TRADEOFF = "A +/-1 line window that can suppress a neighbouring finding is intended."
+
+
+def _review_prompt_with_anti_policies(tmp_path, monkeypatch, mock_github_client, mock_provider):
+    """Run `marginal review` with `anti_policies` configured; return the prompt sent."""
+    monkeypatch.chdir(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = _pull_request()
+    client.get_pull_request_files.return_value = [
+        {"filename": "marginal/dedup.py", "patch": "@@ -1,3 +1,4 @@\n+WINDOW = 1"}
+    ]
+    provider = mock_provider.return_value
+    provider.generate_structured = AsyncMock(return_value=_FindingsResponse(findings=[]))
+
+    assert main(["review", "--repo", "acme/widgets", "--pr", "42"]) == 0
+    return provider.generate_structured.call_args.args[0]
+
+
+def test_review_folds_a_configured_anti_policy_under_a_never_flag_framing(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_policies(
+        tmp_path, [".marginal/anti-policies/tradeoffs.md"], key="anti_policies"
+    )
+    anti_dir = tmp_path / ".marginal" / "anti-policies"
+    anti_dir.mkdir()
+    (anti_dir / "tradeoffs.md").write_text(_TRADEOFF)
+
+    prompt = _review_prompt_with_anti_policies(
+        tmp_path, monkeypatch, mock_github_client, mock_provider
+    )
+
+    section = prompt[prompt.index("Never flag") : prompt.index("--- marginal/dedup.py ---")]
+    assert "--- .marginal/anti-policies/tradeoffs.md ---" in section
+    assert _TRADEOFF in section
+    # Distinct from `config.policies`' "weigh the diff against" framing.
+    assert "engineering policies" not in prompt
+
+
+def test_review_without_anti_policies_sends_an_unchanged_prompt(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+
+    prompt = _review_prompt_with_anti_policies(
+        tmp_path, monkeypatch, mock_github_client, mock_provider
+    )
+
+    assert prompt == (
+        f"{FINDING_PROMPT_INSTRUCTIONS}\n\n--- marginal/dedup.py ---\n@@ -1,3 +1,4 @@\n+WINDOW = 1"
+    )
+
+
+def test_review_with_a_missing_anti_policy_file_warns_and_still_reviews(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_policies(
+        tmp_path, [".marginal/anti-policies/missing.md"], key="anti_policies"
+    )
+
+    prompt = _review_prompt_with_anti_policies(
+        tmp_path, monkeypatch, mock_github_client, mock_provider
+    )
+
+    err = capsys.readouterr().err
+    assert "policy file not found" in err
+    assert ".marginal/anti-policies/missing.md" in err
+    assert "Never flag" not in prompt
 
 
 # -- review: graph context folding ------------------------------------------

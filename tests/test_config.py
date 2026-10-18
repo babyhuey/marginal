@@ -42,6 +42,9 @@ policies:
   - .marginal/policies/architecture.md
   - .marginal/policies/review.md
 
+anti_policies:
+  - .marginal/anti-policies/accepted-tradeoffs.md
+
 permissions:
   read:
     repository: true
@@ -75,6 +78,7 @@ def test_missing_config_returns_defaults(tmp_path):
     assert config.ownership.notify_responsible is False
     assert config.models == {}
     assert config.policies == []
+    assert config.anti_policies == []
     assert config.permissions.read.repository is True
     assert config.permissions.write.comments is True
     assert config.permissions.write.labels is False
@@ -104,6 +108,7 @@ def test_full_example_from_spec_parses(tmp_path):
         ".marginal/policies/architecture.md",
         ".marginal/policies/review.md",
     ]
+    assert config.anti_policies == [".marginal/anti-policies/accepted-tradeoffs.md"]
 
 
 def test_partial_config_merges_with_defaults(tmp_path):
@@ -142,6 +147,13 @@ def test_non_positive_max_comments_is_rejected(tmp_path, max_comments):
 
 def test_invalid_tone_is_rejected(tmp_path):
     write_config(tmp_path, "review:\n  tone: sarcastic\n")
+
+    with pytest.raises(ConfigValidationError):
+        load_config(tmp_path)
+
+
+def test_anti_policies_that_are_not_a_list_of_paths_are_rejected(tmp_path):
+    write_config(tmp_path, "anti_policies:\n  path: .marginal/anti-policies/tradeoffs.md\n")
 
     with pytest.raises(ConfigValidationError):
         load_config(tmp_path)

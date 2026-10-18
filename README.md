@@ -175,6 +175,11 @@ models:
   reviewer:
     provider: openai
     model: codex
+
+policies:        # rules the review checks the diff against
+  - .marginal/policies/security.md
+anti_policies:   # deliberate tradeoffs marginal must never flag
+  - .marginal/anti-policies/accepted-tradeoffs.md
 ```
 
 API keys are never stored in configuration — only in your CI secrets or environment. See the full [specification](docs/REQUIREMENTS.md) for every option.
