@@ -88,6 +88,11 @@ class GitHubClient:
         self._require_read("pull_requests")
         return self._get_all_pages(f"/repos/{self._repo}/pulls/{number}/reviews")
 
+    def list_issue_comments(self, number: int) -> list[dict[str, object]]:
+        """Return every top-level (non-review) comment on the PR, across all pages."""
+        self._require_read("pull_requests")
+        return self._get_all_pages(f"/repos/{self._repo}/issues/{number}/comments")
+
     def list_review_threads(self, number: int) -> list[dict[str, object]]:
         """Return every review thread on the PR as `{"id", "is_resolved",
         "comment_id"}`, where `comment_id` is the REST id of the thread's first

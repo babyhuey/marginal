@@ -2533,3 +2533,16 @@ def test_a_rejected_token_during_the_recheck_never_fails_the_review(
 
     assert exit_code == 0
     assert "couldn't re-check earlier findings: token rejected" in capsys.readouterr().err
+
+
+def test_rereview_reads_pr_comments_for_dismissals(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    client = mock_github_client.return_value
+    client.list_issue_comments.return_value = []
+
+    assert (
+        _rereview(tmp_path, monkeypatch, mock_github_client, mock_provider, still_applies=True) == 0
+    )
+
+    client.list_issue_comments.assert_called_once_with(42)

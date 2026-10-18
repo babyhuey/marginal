@@ -411,7 +411,7 @@ def _close_resolved_findings(
     """Best-effort `marginal compact --comment` for a re-review: logs one line
     to stderr and never fails the review or touches stdout."""
     # Imported here: `marginal.cli.compact` imports helpers from this module.
-    from marginal.cli.compact import CompactSkipped, close_resolved_findings
+    from marginal.cli.compact import CompactSkipped, _is_closed, close_resolved_findings
 
     try:
         findings, verdicts = close_resolved_findings(
@@ -421,6 +421,7 @@ def _close_resolved_findings(
             files,
             review_comments,
             client.list_review_threads(pr_number),
+            client.list_issue_comments(pr_number),
             max_prompt_tokens=max_prompt_tokens,
             post=True,
             log_prefix="marginal review",
@@ -429,7 +430,7 @@ def _close_resolved_findings(
         print(f"marginal review: couldn't re-check earlier findings: {exc}", file=sys.stderr)
         return
     if findings:
-        resolved = sum(1 for v in verdicts.values() if not v.still_applies)
+        resolved = sum(1 for v in verdicts.values() if _is_closed(v))
         print(
             f"marginal review: re-checked {len(findings)} earlier finding(s): "
             f"{resolved} resolved, {len(findings) - resolved} still open",

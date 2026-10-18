@@ -214,6 +214,7 @@ def test_get_pull_request_files_follows_every_full_page(monkeypatch):
     [
         ("list_review_comments", "/repos/acme/widgets/pulls/7/comments"),
         ("list_reviews", "/repos/acme/widgets/pulls/7/reviews"),
+        ("list_issue_comments", "/repos/acme/widgets/issues/7/comments"),
     ],
 )
 def test_pr_comment_reads_follow_every_full_page(monkeypatch, method, path):
@@ -232,7 +233,7 @@ def test_pr_comment_reads_follow_every_full_page(monkeypatch, method, path):
     assert second_call.kwargs["params"] == {"per_page": 100, "page": 2}
 
 
-@pytest.mark.parametrize("method", ["list_review_comments", "list_reviews"])
+@pytest.mark.parametrize("method", ["list_review_comments", "list_reviews", "list_issue_comments"])
 def test_pr_comment_reads_denied_without_read_permission(monkeypatch, method):
     monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
     session = MagicMock()

@@ -16,6 +16,7 @@ from marginal.github.errors import GitHubAPIError, GitHubAuthenticationError, Pe
 from marginal.providers.errors import MissingCredentialsError, ProviderError, ProviderResponseError
 from marginal.providers.factory import get_provider
 from marginal.review.dedup import _MARKER
+from marginal.review.redact import redact_secrets
 from marginal.review.replies import RESOLVED_MARKER, is_marginal_comment
 
 COMPACT_HEADING = "### 🧹 marginal compact"
@@ -27,8 +28,16 @@ RECHECK_INSTRUCTIONS = (
     "still_applies=false only if the current code clearly no longer has the "
     "problem (it was fixed, or the code was removed); if you're unsure, answer "
     "true. Give a one-sentence reason either way, and return one result per "
-    "finding id."
+    "finding id.\n"
+    "People may have answered a finding, in its own replies or in the other pull "
+    "request comments listed after the findings. If a person's comment says that "
+    "specific finding is wrong, not an issue, or intentional, set dismissed_by to "
+    'that comment\'s id. A general approval ("LGTM"), a question, or a comment '
+    "about something else dismisses nothing -- leave dismissed_by null."
 )
+
+# Characters kept from each person's comment quoted in the re-check prompt.
+_ANSWER_CHARS = 600
 
 _GITHUB_ERRORS = (PermissionDeniedError, GitHubAuthenticationError, GitHubAPIError)
 
@@ -39,6 +48,8 @@ class _Recheck(BaseModel):
     id: int
     still_applies: bool
     reason: str
+    # A person's comment id that disputes this finding, if any.
+    dismissed_by: int | None = None
 
 
 class _RecheckResponse(BaseModel):
@@ -89,6 +100,7 @@ def run_compact(repo: str, pr_number: int, path: str = ".", *, comment: bool = F
         files = client.get_pull_request_files(pr_number)
         comments = client.list_review_comments(pr_number)
         threads = client.list_review_threads(pr_number)
+        issue_comments = client.list_issue_comments(pr_number)
     except _GITHUB_ERRORS as exc:
         print(f"marginal compact: {exc}", file=sys.stderr)
         return 1
@@ -101,6 +113,7 @@ def run_compact(repo: str, pr_number: int, path: str = ".", *, comment: bool = F
             files,
             comments,
             threads,
+            issue_comments,
             max_prompt_tokens=config.review.max_prompt_tokens,
             post=comment,
             log_prefix="marginal compact",
@@ -133,6 +146,7 @@ def close_resolved_findings(
     files: list[dict[str, object]],
     comments: list[dict[str, object]],
     threads: list[dict[str, object]],
+    issue_comments: list[dict[str, object]],
     *,
     max_prompt_tokens: int,
     post: bool,
@@ -141,8 +155,12 @@ def close_resolved_findings(
     """Re-check marginal's open findings and, with `post`, close the resolved ones.
 
     Returns the open findings and the verdict for each one the model (or the
-    file-left-the-diff rule) answered. A finding still open gets nothing
-    posted. Raises `CompactSkipped` over budget, `ProviderError` from the
+    file-left-the-diff rule) answered. A finding is closed when the current
+    code no longer has the problem, or when a person's comment disputes it:
+    the model matches each finding against the human replies in its thread
+    and the human PR comments (`issue_comments`) posted after it, and a
+    dismissal is only kept if it names one of those comments. A finding still
+    open gets nothing posted. Raises `CompactSkipped` over budget, `ProviderError` from the
     model, and GitHub errors from posting a reply; a failed thread resolve is
     only reported on stderr under `log_prefix`. Shared by `marginal compact`
     and `marginal review --comment`'s re-check on later pushes.
@@ -163,8 +181,9 @@ def close_resolved_findings(
         if c.get("path") not in patches
     }
     to_check = [c for c in findings if c["id"] not in verdicts]
+    answers = _answers(to_check, comments, issue_comments)
     if to_check:
-        prompt = _build_recheck_prompt(to_check, patches)
+        prompt = _build_recheck_prompt(to_check, patches, answers)
         estimated_tokens = _estimate_tokens(prompt)
         if estimated_tokens > max_prompt_tokens:
             raise CompactSkipped(
@@ -172,17 +191,24 @@ def close_resolved_findings(
                 f"review.max_prompt_tokens ({max_prompt_tokens:,}), so no model was called"
             )
         results = asyncio.run(_recheck(model_spec, prompt))
-        asked = {c["id"] for c in to_check}
-        verdicts.update({r.id: r for r in results if r.id in asked})
+        for r in results:
+            if r.id not in answers:
+                continue
+            # Only a person's comment this finding was shown with can dismiss it.
+            if r.dismissed_by not in {a["id"] for a in answers[r.id]}:
+                r = r.model_copy(update={"dismissed_by": None})
+            verdicts[r.id] = r
 
     if post:
+        by_id = {a["id"]: a for found in answers.values() for a in found}
         for c in findings:
-            if c["id"] not in verdicts or verdicts[c["id"]].still_applies:
+            verdict = verdicts.get(c["id"])
+            if verdict is None or not _is_closed(verdict):
                 continue
             client.reply_to_review_comment(
                 pr_number,
                 c["id"],
-                f"✅ **Resolved**: {verdicts[c['id']].reason}\n\n{RESOLVED_MARKER}",
+                f"✅ **Resolved**: {_resolution(verdict, by_id)}\n\n{RESOLVED_MARKER}",
             )
             # Best-effort: the reply already records the resolution, so a token
             # that can't resolve threads costs only the collapse, not the run.
@@ -212,18 +238,80 @@ def _open_findings(comments: list[dict[str, object]]) -> list[dict[str, object]]
     ]
 
 
-def _build_recheck_prompt(findings: list[dict[str, object]], patches: dict[str, str]) -> str:
-    """The instructions, each finding with its id and location, then the
-    current diff of every file those findings are in (each file once)."""
-    blocks = [
-        f"--- finding {c['id']} at {_location(c)} ---\n"
-        f"{_MARKER.sub('', str(c.get('body') or '')).strip()}"
-        for c in findings
-    ]
+def _build_recheck_prompt(
+    findings: list[dict[str, object]],
+    patches: dict[str, str],
+    answers: dict[object, list[dict[str, object]]],
+) -> str:
+    """The instructions, each finding with its id, location and its thread's
+    human replies, then the other human PR comments, then the current diff of
+    every file those findings are in (each file once)."""
+    blocks = []
+    for c in findings:
+        replies = [a for a in answers[c["id"]] if a.get("in_reply_to_id") == c["id"]]
+        blocks.append(
+            "\n".join(
+                [
+                    f"--- finding {c['id']} at {_location(c)} ---",
+                    _MARKER.sub("", str(c.get("body") or "")).strip(),
+                    *(_quote(a, "reply") for a in replies),
+                ]
+            )
+        )
+    shared = {
+        a["id"]: a for found in answers.values() for a in found if not a.get("in_reply_to_id")
+    }
+    others = ["Other pull request comments:", *(_quote(a, "comment") for a in shared.values())]
     diffs = [
         f"--- {file} ---\n{patches[file]}" for file in dict.fromkeys(c["path"] for c in findings)
     ]
-    return "\n\n".join([RECHECK_INSTRUCTIONS, *blocks, "Current diff:", *diffs])
+    return "\n\n".join(
+        [RECHECK_INSTRUCTIONS, *blocks, *(others if shared else []), "Current diff:", *diffs]
+    )
+
+
+def _answers(
+    findings: list[dict[str, object]],
+    comments: list[dict[str, object]],
+    issue_comments: list[dict[str, object]],
+) -> dict[object, list[dict[str, object]]]:
+    """For each finding, the people's comments that could answer it: human
+    replies in its own thread, and human PR comments posted after it."""
+    people = [c for c in issue_comments if _is_person(c)]
+    return {
+        f["id"]: [c for c in comments if c.get("in_reply_to_id") == f["id"] and _is_person(c)]
+        + [c for c in people if str(c.get("created_at") or "") > str(f.get("created_at") or "")]
+        for f in findings
+    }
+
+
+def _is_person(comment: dict[str, object]) -> bool:
+    body = str(comment.get("body") or "").strip()
+    user = comment.get("user") or {}
+    return bool(body) and user.get("type") != "Bot" and not is_marginal_comment(body)
+
+
+def _quote(comment: dict[str, object], kind: str) -> str:
+    login = (comment.get("user") or {}).get("login", "someone")
+    text = redact_secrets(str(comment.get("body") or "").strip())
+    if len(text) > _ANSWER_CHARS:
+        text = text[:_ANSWER_CHARS].rstrip() + " [...]"
+    return f"{kind} {comment['id']} by @{login}: {text}"
+
+
+def _is_closed(verdict: _Recheck) -> bool:
+    return not verdict.still_applies or verdict.dismissed_by is not None
+
+
+def _resolution(verdict: _Recheck, by_id: dict[object, dict[str, object]]) -> str:
+    """Why a closed finding is closed: who dismissed it, or the code change."""
+    if verdict.dismissed_by is None:
+        return verdict.reason
+    comment = by_id[verdict.dismissed_by]
+    login = (comment.get("user") or {}).get("login", "someone")
+    first_line = str(comment.get("body") or "").strip().splitlines()[0]
+    quote = first_line if len(first_line) <= 120 else first_line[:117].rstrip() + "..."
+    return f'@{login} says this isn\'t an issue ("{quote}"), so marginal is closing it.'
 
 
 async def _recheck(model_spec: ModelSpec, prompt: str) -> list[_Recheck]:
@@ -239,9 +327,7 @@ async def _recheck(model_spec: ModelSpec, prompt: str) -> list[_Recheck]:
 def _summary_lines(
     pr_number: int, findings: list[dict[str, object]], verdicts: dict[object, _Recheck]
 ) -> list[str]:
-    resolved = sum(
-        1 for c in findings if c["id"] in verdicts and not verdicts[c["id"]].still_applies
-    )
+    resolved = sum(1 for c in findings if c["id"] in verdicts and _is_closed(verdicts[c["id"]]))
     lines = [
         COMPACT_HEADING,
         "",
@@ -253,6 +339,11 @@ def _summary_lines(
         verdict = verdicts.get(c["id"])
         if verdict is None:
             lines.append(f"- ⏳ `{_location(c)}`: no answer from the model, left open")
+        elif verdict.dismissed_by is not None:
+            lines.append(
+                f"- ✅ `{_location(c)}`: dismissed in comment {verdict.dismissed_by}. "
+                f"{verdict.reason}"
+            )
         elif verdict.still_applies:
             lines.append(f"- ⏳ `{_location(c)}`: still applies. {verdict.reason}")
         else:
