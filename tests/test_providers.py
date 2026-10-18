@@ -18,7 +18,7 @@ from marginal.providers import (
 )
 from marginal.providers.anthropic import AnthropicProvider, _strict_input_schema
 from marginal.providers.credentials import require_env
-from marginal.providers.openai import OpenAIProvider
+from marginal.providers.openai import OllamaProvider, OpenAIProvider
 
 
 class Verdict(BaseModel):
@@ -559,3 +559,59 @@ async def test_openai_stream_wraps_sdk_api_error_mid_iteration():
             chunks.append(chunk)
 
     assert chunks == ["he"]
+
+
+# -- OllamaProvider -----------------------------------------------------------
+
+
+def test_get_provider_resolves_ollama_without_any_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    provider = get_provider(ModelSpec(provider="ollama", model="qwen2.5-coder"))
+
+    assert isinstance(provider, OllamaProvider)
+    assert str(provider._client.base_url) == "http://localhost:11434/v1/"
+
+
+def test_get_provider_points_ollama_at_the_configured_base_url():
+    spec = ModelSpec(provider="ollama", model="qwen2.5-coder", base_url="http://gpu-box:11434/v1")
+
+    provider = get_provider(spec)
+
+    assert str(provider._client.base_url) == "http://gpu-box:11434/v1/"
+
+
+def test_ollama_never_sends_the_openai_api_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-cloud-key")
+
+    provider = get_provider(ModelSpec(provider="ollama", model="qwen2.5-coder"))
+
+    assert provider._client.api_key == "ollama"
+
+
+async def test_ollama_generate_structured_sends_a_json_schema_response_format():
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock())))
+    client.chat.completions.create.return_value = _openai_content_response(
+        '{"approved": true, "reason": "fine"}'
+    )
+    provider = OllamaProvider("qwen2.5-coder", client=client)
+
+    result = await provider.generate_structured("review this", Verdict)
+
+    assert result == Verdict(approved=True, reason="fine")
+    _, kwargs = client.chat.completions.create.call_args
+    assert kwargs["model"] == "qwen2.5-coder"
+    # Ollama maps `json_schema.schema` onto its own grammar-constrained `format`.
+    assert kwargs["response_format"]["type"] == "json_schema"
+    assert kwargs["response_format"]["json_schema"]["schema"] == Verdict.model_json_schema()
+
+
+async def test_ollama_errors_name_the_ollama_provider():
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock())))
+    client.chat.completions.create.side_effect = _sdk_error(openai.APIError, "connection refused")
+    provider = OllamaProvider("qwen2.5-coder", client=client)
+
+    with pytest.raises(ProviderAPIError, match="connection refused") as excinfo:
+        await provider.generate("say hi")
+
+    assert excinfo.value.provider == "ollama"
