@@ -34,7 +34,7 @@ from marginal.review.dedup import (
     posted_fingerprints,
 )
 from marginal.review.redact import redact_secrets
-from marginal.review.replies import ReplyThread, maintainer_replies
+from marginal.review.replies import ReplyThread, body_finding_replies, maintainer_replies
 
 SEVERITY_EMOJI = {
     Severity.CRITICAL: "🔴",
@@ -176,7 +176,9 @@ def run_review(
     fails the review itself.
 
     The prompt also carries any maintainer replies to marginal's own inline
-    comments on this PR (`marginal.review.replies.maintainer_replies`), so
+    comments on this PR (`marginal.review.replies.maintainer_replies`), and
+    their PR comments posted after a review with findings in its body
+    (`body_finding_replies`) -- GitHub gives those no reply thread -- so
     the model doesn't raise a point a maintainer already answered again
     unless the code it's about changed. Bounded to the `MAX_REPLY_THREADS`
     most recent threads, each clipped; with no such replies the prompt is
@@ -234,6 +236,8 @@ def run_review(
         review_comments = (
             client.list_review_comments(pr_number) if reviewer_model is not None or comment else []
         )
+        reviews = client.list_reviews(pr_number) if reviewer_model is not None or comment else []
+        issue_comments = client.list_issue_comments(pr_number) if reviewer_model is not None else []
     except (PermissionDeniedError, GitHubAuthenticationError, GitHubAPIError) as exc:
         print(f"marginal review: {exc}", file=sys.stderr)
         return 1
@@ -250,7 +254,9 @@ def run_review(
         redacted_files = _redacted_filenames(files, redacted)
         coverage_lines = _coverage_warning_lines(pull_request, files)
         graph_context = _build_graph_context(path, files, enabled=config.context.code_graph)
-        replies = maintainer_replies(review_comments)
+        replies = maintainer_replies(review_comments) + body_finding_replies(
+            reviews, issue_comments
+        )
         try:
             findings = asyncio.run(
                 _generate_findings(
@@ -305,7 +311,6 @@ def run_review(
     if comment:
         patches = {str(file["filename"]): file.get("patch") for file in files}
         try:
-            reviews = client.list_reviews(pr_number)
             posted = posted_fingerprints(
                 [review.get("body") for review in reviews]
                 + [c.get("body") for c in review_comments]
