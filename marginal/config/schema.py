@@ -38,6 +38,20 @@ class ReviewConfig(BaseModel):
     # huge prompt is skipped rather than paid for. Strict so a stray `true` or
     # `"100k"` is a config error instead of being coerced into a number.
     max_prompt_tokens: int = Field(default=100_000, gt=0, strict=True)
+    # Changed files never sent to the model: machine-written, so a finding on
+    # them is noise, and often huge, so they'd eat `max_prompt_tokens`. A
+    # pattern with no `/` matches the file name in any directory; one with a
+    # `/` matches the whole path. Setting this replaces the defaults.
+    ignore_paths: list[str] = Field(
+        default_factory=lambda: [
+            "*.lock",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "go.sum",
+            "*.min.js",
+            "*.min.css",
+        ]
+    )
     # Opt-in: a second model call that re-scores or drops findings before
     # `confidence_threshold` and `max_comments` apply. Strict for the same
     # reason as `max_prompt_tokens`: it spends the user's API key.

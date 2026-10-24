@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import math
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -194,6 +196,12 @@ def run_review(
     unchanged. Reading the comments needs only `permissions.read`, so this
     happens with or without `comment`.
 
+    Changed files matching `config.review.ignore_paths` (lockfiles and
+    minified assets by default; see `_is_ignored`) stay in the file list but
+    never reach the model or the code graph, and the summary says how many
+    were left out. If every changed file is ignored, the model isn't called
+    at all and the summary carries no verdict, since nothing was reviewed.
+
     If redaction actually masked something, the summary also gets a
     `⚠️ **Redacted a likely secret**` line naming the affected file(s) --
     this is folded into the same body/summary rather than becoming a
@@ -265,13 +273,20 @@ def run_review(
     redacted_files: list[str] = []
     coverage_lines: list[str] = []
     over_budget: _PromptOverBudget | None = None
+    ignore_paths = config.review.ignore_paths
+    reviewed_files = [f for f in files if not _is_ignored(str(f["filename"]), ignore_paths)]
     if reviewer_model is not None:
+        coverage_lines = _ignored_lines(len(files) - len(reviewed_files))
+        coverage_lines += _coverage_warning_lines(pull_request, files, ignore_paths)
+    # Every changed file is ignored: there's no diff to send, so no model call.
+    if reviewer_model is not None and reviewed_files:
         policies = load_policies(path, config.policies)
         anti_policies = load_policies(path, config.anti_policies)
-        redacted = _redact_patches(files)
-        redacted_files = _redacted_filenames(files, redacted)
-        coverage_lines = _coverage_warning_lines(pull_request, files)
-        graph_context = _build_graph_context(path, files, enabled=config.context.code_graph)
+        redacted = _redact_patches(reviewed_files)
+        redacted_files = _redacted_filenames(reviewed_files, redacted)
+        graph_context = _build_graph_context(
+            path, reviewed_files, enabled=config.context.code_graph
+        )
         replies = maintainer_replies(review_comments)
         try:
             findings = asyncio.run(
@@ -317,7 +332,7 @@ def run_review(
     )
 
     # Without a model call nothing was reviewed, so there's no verdict to give.
-    reviewed = reviewer_model is not None and over_budget is None
+    reviewed = reviewer_model is not None and bool(reviewed_files) and over_budget is None
     base_lines = _base_lines(
         pr_number, pull_request, filenames, _verdict(findings) if reviewed else None
     )
@@ -750,8 +765,27 @@ def _missing_patch_filenames(files: list[dict[str, object]]) -> list[str]:
     return [str(file["filename"]) for file in files if not file.get("patch")]
 
 
+def _is_ignored(filename: str, patterns: Sequence[str]) -> bool:
+    """Whether `filename` matches a `review.ignore_paths` pattern: one with no
+    `/` against the file name alone, otherwise against the whole path."""
+    name = filename.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatchcase(filename if "/" in p else name, p) for p in patterns)
+
+
+def _ignored_lines(count: int) -> list[str]:
+    """Name how many changed files `review.ignore_paths` kept from the model."""
+    if not count:
+        return []
+    return [
+        "",
+        f"ℹ️ **{count} file(s) not reviewed** -- they match `review.ignore_paths`.",
+    ]
+
+
 def _coverage_warning_lines(
-    pull_request: dict[str, object], files: list[dict[str, object]]
+    pull_request: dict[str, object],
+    files: list[dict[str, object]],
+    ignore_paths: Sequence[str] = (),
 ) -> list[str]:
     """Warn about any gap between what changed in `pull_request` and what
     `files` actually gave the reviewer model something to look at.
@@ -771,7 +805,10 @@ def _coverage_warning_lines(
             f"⚠️ **Incomplete review coverage** -- reviewed {len(files)} of "
             f"{changed_files} changed files; GitHub did not return the rest.",
         ]
-    missing_patch = _missing_patch_filenames(files)
+    # An ignored file was never going to be reviewed, so its missing patch isn't a gap.
+    missing_patch = [
+        name for name in _missing_patch_filenames(files) if not _is_ignored(name, ignore_paths)
+    ]
     if missing_patch:
         files_list = ", ".join(f"`{filename}`" for filename in missing_patch)
         lines += [
