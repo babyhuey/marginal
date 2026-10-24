@@ -1004,6 +1004,7 @@ def test_review_with_missing_credentials_maps_to_exit_code_3(
         ("", {"draft": True}, "the PR is a draft"),
         ("", {"user": {"login": "dependabot[bot]", "type": "Bot"}}, "dependabot[bot]"),
         ("", {"labels": [{"name": "skip-review"}]}, "`skip-review` label"),
+        ("", {"labels": [{"name": "Skip-Review"}]}, "`skip-review` label"),
         ("review:\n  skip_labels: [wip]\n", {"labels": [{"name": "wip"}]}, "`wip` label"),
     ],
 )

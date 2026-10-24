@@ -422,9 +422,10 @@ def _skip_reason(review: ReviewConfig, pull_request: dict[str, object]) -> str |
     user = pull_request.get("user") or {}
     if review.skip_bots and user.get("type") == "Bot":
         return f"the PR was opened by a bot, {user.get('login')} (review.skip_bots)"
-    labels = {label["name"] for label in pull_request.get("labels") or []}
+    # GitHub label names are case-insensitive.
+    labels = {label["name"].casefold() for label in pull_request.get("labels") or []}
     for label in review.skip_labels:
-        if label in labels:
+        if label.casefold() in labels:
             return f"the PR has the `{label}` label (review.skip_labels)"
     return None
 
