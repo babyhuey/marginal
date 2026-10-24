@@ -104,5 +104,4 @@ marginal/
 └── cli/        # command entry points
 ```
 
-See [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the full specification
-and [`docs/adr/`](docs/adr/) for recorded architecture decisions.
+See [`docs/adr/`](docs/adr/) for recorded architecture decisions.
