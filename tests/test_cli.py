@@ -91,6 +91,17 @@ def test_init_workflow_can_resolve_review_threads(tmp_path):
     }
 
 
+def test_init_workflow_reviews_a_draft_once_it_is_marked_ready(tmp_path):
+    """Drafts are skipped, so without ready_for_review a PR marked ready
+    waits for its next push to get a review."""
+    main(["init", str(tmp_path)])
+
+    workflow = yaml.safe_load((tmp_path / ".github" / "workflows" / "marginal.yml").read_text())
+
+    # PyYAML reads the bare `on` key as boolean True.
+    assert "ready_for_review" in workflow[True]["pull_request"]["types"]
+
+
 def test_init_workflow_passes_both_provider_keys(tmp_path):
     main(["init", str(tmp_path)])
 
