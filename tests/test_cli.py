@@ -986,6 +986,83 @@ def test_review_with_missing_credentials_maps_to_exit_code_3(
     client.create_review.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("config", "pull_request", "reason"),
+    [
+        ("review:\n  enabled: false\n", {}, "review.enabled is false"),
+        ("", {"draft": True}, "the PR is a draft"),
+        ("", {"user": {"login": "dependabot[bot]", "type": "Bot"}}, "dependabot[bot]"),
+        ("", {"labels": [{"name": "skip-review"}]}, "`skip-review` label"),
+        ("review:\n  skip_labels: [wip]\n", {"labels": [{"name": "wip"}]}, "`wip` label"),
+    ],
+)
+def test_review_with_comment_skips_a_pr_without_calling_the_model(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider, config, pull_request, reason
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    config_path = tmp_path / ".marginal" / "config.yaml"
+    config_path.write_text(config_path.read_text() + config)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = {**_pull_request(), **pull_request}
+    client.get_pull_request_files.return_value = [{"filename": "a.py", "patch": "+x"}]
+
+    exit_code = main(["review", "--repo", "acme/widgets", "--pr", "42", "--comment"])
+
+    assert exit_code == 0
+    assert reason in capsys.readouterr().err
+    mock_provider.assert_not_called()
+    client.create_review.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("config", "pull_request"),
+    [
+        ("review:\n  skip_drafts: false\n", {"draft": True}),
+        ("review:\n  skip_bots: false\n", {"user": {"login": "renovate[bot]", "type": "Bot"}}),
+        ("", {"user": {"login": "octocat", "type": "User"}, "labels": [{"name": "bug"}]}),
+    ],
+)
+def test_review_with_comment_reviews_a_pr_no_skip_rule_matches(
+    tmp_path, monkeypatch, mock_github_client, mock_provider, config, pull_request
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    config_path = tmp_path / ".marginal" / "config.yaml"
+    config_path.write_text(config_path.read_text() + config)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = {**_pull_request(), **pull_request}
+    client.get_pull_request_files.return_value = [{"filename": "a.py", "patch": "+x"}]
+    client.list_review_comments.return_value = []
+    client.list_reviews.return_value = []
+    mock_provider.return_value.generate_structured = AsyncMock(
+        return_value=_FindingsResponse(findings=[])
+    )
+
+    exit_code = main(["review", "--repo", "acme/widgets", "--pr", "42", "--comment"])
+
+    assert exit_code == 0
+    client.create_review.assert_called_once()
+
+
+def test_review_without_comment_still_reviews_a_draft(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    """Skip rules only gate posting, so a draft can be previewed locally."""
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = {**_pull_request(), "draft": True}
+    client.get_pull_request_files.return_value = [{"filename": "a.py", "patch": "+x"}]
+    client.list_review_comments.return_value = []
+    mock_provider.return_value.generate_structured = AsyncMock(
+        return_value=_FindingsResponse(findings=[])
+    )
+
+    assert main(["review", "--repo", "acme/widgets", "--pr", "42"]) == 0
+    mock_provider.return_value.generate_structured.assert_called_once()
+
+
 def _write_reviewer_config_with_policies(tmp_path, policy_paths, key="policies"):
     config_dir = tmp_path / ".marginal"
     config_dir.mkdir()
