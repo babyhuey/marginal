@@ -1470,6 +1470,30 @@ def test_review_keeps_ignored_files_from_the_model_and_says_so(
     assert "No diff available" not in out
 
 
+def test_review_with_only_ignored_files_posts_without_calling_the_model(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = _pull_request()
+    client.get_pull_request_files.return_value = [
+        {"filename": "poetry.lock", "patch": "+name = 'requests'"}
+    ]
+    client.list_review_comments.return_value = []
+    client.list_reviews.return_value = []
+
+    exit_code = main(["review", "--repo", "acme/widgets", "--pr", "42", "--comment"])
+
+    assert exit_code == 0
+    mock_provider.assert_not_called()
+    body = client.create_review.call_args.args[1]
+    assert "1 file(s) not reviewed" in body
+    # Nothing was reviewed, so no "No issues found" verdict.
+    assert "No issues found" not in body
+    assert "- `poetry.lock`" in capsys.readouterr().out
+
+
 def test_review_ignore_paths_setting_replaces_the_defaults(
     tmp_path, monkeypatch, mock_github_client, mock_provider
 ):

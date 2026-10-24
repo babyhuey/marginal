@@ -199,7 +199,8 @@ def run_review(
     Changed files matching `config.review.ignore_paths` (lockfiles and
     minified assets by default; see `_is_ignored`) stay in the file list but
     never reach the model or the code graph, and the summary says how many
-    were left out.
+    were left out. If every changed file is ignored, the model isn't called
+    at all and the summary carries no verdict, since nothing was reviewed.
 
     If redaction actually masked something, the summary also gets a
     `⚠️ **Redacted a likely secret**` line naming the affected file(s) --
@@ -262,15 +263,17 @@ def run_review(
     redacted_files: list[str] = []
     coverage_lines: list[str] = []
     over_budget: _PromptOverBudget | None = None
+    ignore_paths = config.review.ignore_paths
+    reviewed_files = [f for f in files if not _is_ignored(str(f["filename"]), ignore_paths)]
     if reviewer_model is not None:
-        policies = load_policies(path, config.policies)
-        anti_policies = load_policies(path, config.anti_policies)
-        ignore_paths = config.review.ignore_paths
-        reviewed_files = [f for f in files if not _is_ignored(str(f["filename"]), ignore_paths)]
-        redacted = _redact_patches(reviewed_files)
-        redacted_files = _redacted_filenames(reviewed_files, redacted)
         coverage_lines = _ignored_lines(len(files) - len(reviewed_files))
         coverage_lines += _coverage_warning_lines(pull_request, files, ignore_paths)
+    # Every changed file is ignored: there's no diff to send, so no model call.
+    if reviewer_model is not None and reviewed_files:
+        policies = load_policies(path, config.policies)
+        anti_policies = load_policies(path, config.anti_policies)
+        redacted = _redact_patches(reviewed_files)
+        redacted_files = _redacted_filenames(reviewed_files, redacted)
         graph_context = _build_graph_context(
             path, reviewed_files, enabled=config.context.code_graph
         )
@@ -319,7 +322,7 @@ def run_review(
     )
 
     # Without a model call nothing was reviewed, so there's no verdict to give.
-    reviewed = reviewer_model is not None and over_budget is None
+    reviewed = reviewer_model is not None and bool(reviewed_files) and over_budget is None
     base_lines = _base_lines(
         pr_number, pull_request, filenames, _verdict(findings) if reviewed else None
     )
