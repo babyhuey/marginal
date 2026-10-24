@@ -26,6 +26,7 @@ from marginal.cli.review import (
     _estimate_tokens,
     _finding_badge,
     _FindingsResponse,
+    _is_ignored,
     _missing_patch_filenames,
     _redact_patches,
     _redacted_filenames,
@@ -1420,6 +1421,76 @@ def test_review_with_comment_flag_posts_the_coverage_warning_in_the_body(
     assert exit_code == 0
     body = client.create_review.call_args.args[1]
     assert "⚠️ **No diff available** for `huge.bin`" in body
+
+
+@pytest.mark.parametrize(
+    ("filename", "patterns", "ignored"),
+    [
+        ("poetry.lock", ["*.lock"], True),
+        ("web/package-lock.json", ["package-lock.json"], True),
+        ("static/app.min.js", ["*.min.js"], True),
+        ("vendor/lib/x.go", ["vendor/*"], True),
+        ("src/vendor/x.go", ["vendor/*"], False),
+        ("src/lock.py", ["*.lock"], False),
+        ("api.py", [], False),
+    ],
+)
+def test_is_ignored_matches_bare_patterns_by_name_and_slashed_ones_by_path(
+    filename, patterns, ignored
+):
+    assert _is_ignored(filename, patterns) is ignored
+
+
+def test_review_keeps_ignored_files_from_the_model_and_says_so(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = {**_pull_request(), "changed_files": 3}
+    client.get_pull_request_files.return_value = [
+        {"filename": "api.py", "patch": "+def handler(): ..."},
+        {"filename": "poetry.lock", "patch": "+name = 'requests'"},
+        # Too big for GitHub to send a patch -- ignored, so not a coverage gap.
+        {"filename": "web/package-lock.json"},
+    ]
+    provider = mock_provider.return_value
+    provider.generate_structured = AsyncMock(return_value=_findings_response())
+
+    exit_code = main(["review", "--repo", "acme/widgets", "--pr", "42"])
+
+    assert exit_code == 0
+    prompt = provider.generate_structured.call_args.args[0]
+    assert "def handler" in prompt
+    assert "poetry.lock" not in prompt
+    assert "package-lock.json" not in prompt
+    out = capsys.readouterr().out
+    assert "- `poetry.lock`" in out
+    assert "2 file(s) not reviewed" in out
+    assert "No diff available" not in out
+
+
+def test_review_ignore_paths_setting_replaces_the_defaults(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    monkeypatch.chdir(tmp_path)
+    _write_reviewer_config(tmp_path)
+    config_path = tmp_path / ".marginal" / "config.yaml"
+    config_path.write_text(config_path.read_text() + "review:\n  ignore_paths: [gen/*]\n")
+    client = mock_github_client.return_value
+    client.get_pull_request.return_value = _pull_request()
+    client.get_pull_request_files.return_value = [
+        {"filename": "gen/models.py", "patch": "+GENERATED = 1"},
+        {"filename": "poetry.lock", "patch": "+name = 'requests'"},
+    ]
+    provider = mock_provider.return_value
+    provider.generate_structured = AsyncMock(return_value=_findings_response())
+
+    main(["review", "--repo", "acme/widgets", "--pr", "42"])
+
+    prompt = provider.generate_structured.call_args.args[0]
+    assert "GENERATED" not in prompt
+    assert "poetry.lock" in prompt
 
 
 def test_review_omits_the_coverage_warning_when_fully_covered(
