@@ -110,6 +110,9 @@ name: marginal
 
 on:
   pull_request:
+    # ready_for_review: a draft is skipped (review.skip_drafts), so review it
+    # once it's marked ready rather than waiting for the next push.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # One review per PR at a time: two runs started by quick successive pushes
 # would each miss the other's review and post the same header twice.
@@ -187,6 +190,10 @@ review:
   max_prompt_tokens: 100000  # estimated; over this, the model is never called
   self_reflect: false  # true: a second model call re-checks findings before they're filtered
   tone: concise
+  # With --comment, these PRs get no review and no model call
+  skip_drafts: true
+  skip_bots: true           # dependabot, renovate, any GitHub App author
+  skip_labels: [skip-review]
 
 context:
   git_history: true

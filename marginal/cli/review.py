@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from marginal.config.errors import ConfigError
 from marginal.config.loader import load_config
-from marginal.config.schema import ModelSpec
+from marginal.config.schema import ModelSpec, ReviewConfig
 from marginal.github.client import GitHubClient
 from marginal.github.errors import (
     GitHubAPIError,
@@ -215,6 +215,10 @@ def run_review(
     One with no identifiable line still falls back to the body, so it isn't
     silently dropped. Omitting `--comment` posts nothing back to GitHub.
 
+    With `comment` set, a PR `_skip_reason` names -- `review.enabled` off,
+    a draft, a bot author, or a `review.skip_labels` label -- gets no model
+    call and nothing posted: one stderr line says why and it exits 0.
+
     Returns 0 on success. An invalid `.marginal/config.yaml` (`ConfigError`),
     a denied permission, missing/invalid token, GitHub API error, or
     `ProviderError` — whether raised while loading config, fetching,
@@ -248,6 +252,12 @@ def run_review(
     except (PermissionDeniedError, GitHubAuthenticationError, GitHubAPIError) as exc:
         print(f"marginal review: {exc}", file=sys.stderr)
         return 1
+
+    # Only with `--comment`, so a draft can still be previewed locally.
+    skip_reason = _skip_reason(config.review, pull_request) if comment else None
+    if skip_reason is not None:
+        print(f"marginal review: skipped, nothing posted -- {skip_reason}", file=sys.stderr)
+        return 0
 
     filenames = [str(file["filename"]) for file in files]
 
@@ -401,6 +411,23 @@ def run_review(
         print(json.dumps(result, indent=2))
 
     return 0
+
+
+def _skip_reason(review: ReviewConfig, pull_request: dict[str, object]) -> str | None:
+    """Why `--comment` should post nothing for `pull_request`, or `None`."""
+    if not review.enabled:
+        return "review.enabled is false"
+    if review.skip_drafts and pull_request.get("draft"):
+        return "the PR is a draft (review.skip_drafts)"
+    user = pull_request.get("user") or {}
+    if review.skip_bots and user.get("type") == "Bot":
+        return f"the PR was opened by a bot, {user.get('login')} (review.skip_bots)"
+    # GitHub label names are case-insensitive.
+    labels = {label["name"].casefold() for label in pull_request.get("labels") or []}
+    for label in review.skip_labels:
+        if label.casefold() in labels:
+            return f"the PR has the `{label}` label (review.skip_labels)"
+    return None
 
 
 def _close_resolved_findings(

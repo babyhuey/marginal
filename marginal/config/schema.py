@@ -43,6 +43,12 @@ class ReviewConfig(BaseModel):
     # reason as `max_prompt_tokens`: it spends the user's API key.
     self_reflect: bool = Field(default=False, strict=True)
     tone: ReviewTone = ReviewTone.CONCISE
+    # With `--comment`, these PRs get no review posted and no model call:
+    # unfinished (drafts), machine-written (bot authors), or opted out by
+    # label. Each one would otherwise spend the team's API key.
+    skip_drafts: bool = True
+    skip_bots: bool = True
+    skip_labels: list[str] = Field(default_factory=lambda: ["skip-review"])
 
 
 class ContextConfig(BaseModel):
