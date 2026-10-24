@@ -37,3 +37,27 @@ def test_help_unknown_command_exits_nonzero():
         main(["help", "not-a-command"])
 
     assert excinfo.value.code == 2
+
+
+def test_version_flag_prints_the_installed_version(capsys):
+    from importlib.metadata import version
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"marginal {version('marginal-review')}\n"
+
+
+def test_commands_still_run_when_package_metadata_is_missing(monkeypatch, capsys):
+    from importlib.metadata import PackageNotFoundError
+
+    def missing(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("marginal.cli.version", missing)
+
+    assert main(["help"]) == 0
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    assert "marginal unknown" in capsys.readouterr().out
