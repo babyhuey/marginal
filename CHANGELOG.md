@@ -2,6 +2,113 @@
 
 <!-- towncrier release notes start -->
 
+## marginal v0.2.9, 2026-10-25
+
+### Breaking Changes
+
+### New Features
+
+- With `--comment`, `marginal review` now skips a PR instead of reviewing it
+  when it's a draft (`review.skip_drafts`), opened by a bot such as
+  dependabot or renovate (`review.skip_bots`), or carries a label listed in
+  `review.skip_labels` (default `skip-review`), and `review.enabled: false`
+  now actually turns reviews off. A skipped PR gets no model call and nothing
+  posted, just one line in the run log saying why. Without `--comment` the
+  review still runs, so a draft can be previewed locally. The workflow
+  `marginal init` writes now also triggers on `ready_for_review`, so a draft is
+  reviewed as soon as it's marked ready -- add `types: [opened, synchronize,
+  reopened, ready_for_review]` under `pull_request:` in an existing workflow
+  to get the same
+
+  ([ISSUE-138](https://github.com/exactml/marginal/issues/138),
+  [PR-141](https://github.com/exactml/marginal/pull/141) by [@exactml](https://github.com/exactml))
+
+- Added `review.ignore_paths`, a list of glob patterns for changed files
+  `marginal review` never sends to the model -- by default common lockfiles
+  (`*.lock`, `package-lock.json`, `pnpm-lock.yaml`, `go.sum`) and minified
+  `*.min.js`/`*.min.css`. A pattern with no `/` matches the file name in any
+  directory; one with a `/` matches the whole path. Ignored files stay in the
+  changed-file list, the summary says how many were left out, and a dependency
+  bump no longer eats `review.max_prompt_tokens`. A PR that only changes
+  ignored files gets no model call at all
+
+  ([ISSUE-139](https://github.com/exactml/marginal/issues/139),
+  [PR-142](https://github.com/exactml/marginal/pull/142) by [@exactml](https://github.com/exactml))
+
+- Added `marginal --version`, which prints the installed release (e.g.
+  `marginal 0.2.9`)
+
+  ([ISSUE-145](https://github.com/exactml/marginal/issues/145),
+  [PR-148](https://github.com/exactml/marginal/pull/148) by [@exactml](https://github.com/exactml))
+
+### Improvements
+
+- When a provider's API key variable is set but empty -- which is how a
+  missing or blank repository secret reaches marginal in GitHub Actions --
+  `marginal review` and `marginal doctor` now say so and point at the
+  secret, instead of claiming the variable isn't set
+
+  ([ISSUE-144](https://github.com/exactml/marginal/issues/144),
+  [PR-147](https://github.com/exactml/marginal/pull/147) by [@exactml](https://github.com/exactml))
+
+### Fixes
+
+- A finding's message no longer ends with a stray fragment of the model's
+  structured output (e.g. `...fractional cents.', 'file'] ,`), which a model
+  could write into the text and marginal used to post as-is
+
+  ([ISSUE-143](https://github.com/exactml/marginal/issues/143),
+  [PR-146](https://github.com/exactml/marginal/pull/146) by [@exactml](https://github.com/exactml))
+
+- A pull request can no longer change the rules it's reviewed by.
+  `marginal review` and `marginal compact` now read `.marginal/config.yaml`,
+  policies, and anti-policies from the PR's base commit instead of its
+  checkout, so a PR that sets `review.enabled: false`, ignores every file, or
+  adds an anti-policy is still reviewed under the base branch's rules. The
+  summary notes when a PR edits `.marginal/`, since the edits apply after it
+  merges. The PR that first adds marginal's config still uses its own
+
+  ([ISSUE-151](https://github.com/exactml/marginal/issues/151),
+  [PR-172](https://github.com/exactml/marginal/pull/172) by [@exactml](https://github.com/exactml))
+
+- Two kinds of secret could reach the model unredacted and now don't: a
+  password inside a URL (`https://user:pass@host` is sent as
+  `https://[REDACTED]@host`), and anything in the snippets of out-of-diff
+  callers that the code graph adds to the prompt. URLs without credentials,
+  such as Databricks MLflow URIs like `databricks`, are unchanged
+
+  ([ISSUE-170](https://github.com/exactml/marginal/issues/170),
+  [PR-171](https://github.com/exactml/marginal/pull/171) by [@exactml](https://github.com/exactml))
+
+- In GitHub Actions, marginal now actually collapses the threads it resolves.
+  The Actions token needs `contents: write` to resolve a review thread --
+  with only `pull-requests: write` GitHub answers "Resource not accessible by
+  integration" -- so the workflow `marginal init` writes, and the README
+  example, now grant it (marginal never pushes). Existing workflows need
+  `contents: write` added under the job's `permissions:`. A thread marginal
+  already replied `✅ Resolved` in but couldn't resolve is resolved on the next
+  run, without posting the reply again, and a failed resolve now says which
+  permission is missing
+
+  ([PR-135](https://github.com/exactml/marginal/pull/135) by [@exactml](https://github.com/exactml))
+
+### Warnings
+
+- Draft PRs and PRs opened by bots are no longer reviewed by default. Set
+  `review.skip_drafts: false` or `review.skip_bots: false` to keep reviewing
+  them. To have a draft reviewed as soon as it's marked ready, add
+  `ready_for_review` to your workflow's `pull_request` types
+
+  ([ISSUE-138](https://github.com/exactml/marginal/issues/138),
+  [PR-141](https://github.com/exactml/marginal/pull/141) by [@exactml](https://github.com/exactml))
+
+- Changes to `.marginal/config.yaml` and policy files now take effect only after
+  they merge to the base branch. A PR that tunes marginal's settings is reviewed
+  with the old ones
+
+  ([ISSUE-151](https://github.com/exactml/marginal/issues/151),
+  [PR-172](https://github.com/exactml/marginal/pull/172) by [@exactml](https://github.com/exactml))
+
 ## marginal v0.2.8, 2026-10-18
 
 ### Breaking Changes
