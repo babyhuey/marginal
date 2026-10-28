@@ -1707,6 +1707,7 @@ def test_review_format_json_prints_parseable_json_with_pr_metadata(
         "head_sha": "def456",
         "changed_files": ["marginal/retry.py", "tests/test_retry.py"],
         "findings": [],
+        "filtered_findings": [],
         "redacted_files": [],
         "comment_posted": False,
         "prompt_over_budget": False,
@@ -1786,9 +1787,18 @@ def test_review_format_json_omits_a_finding_below_the_confidence_threshold(
 
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
-    # Below the default confidence_threshold (0.85) -- filtered out entirely,
-    # so the json path sees post-filter_findings data, not the raw output.
+    # Below the default confidence_threshold (0.85): never posted, but listed
+    # under filtered_findings so its confidence shows how close it came.
     assert result["findings"] == []
+    assert result["filtered_findings"] == [
+        {
+            "file": "marginal/retry.py",
+            "line": 2,
+            "severity": "low",
+            "confidence": 0.5,
+            "message": "Might be worth a second look, but not sure.",
+        }
+    ]
 
 
 def test_review_format_json_reports_redacted_files(
@@ -2117,6 +2127,7 @@ def test_build_json_result_serializes_a_finding_as_plain_json():
         [],
         comment_posted=True,
         prompt_over_budget=False,
+        filtered_findings=[],
     )
 
     # Round-trips cleanly -- severity is a plain string, not an enum repr.
@@ -2189,6 +2200,7 @@ def test_review_of_two_commits_reviews_the_compare_diff_with_base_config(
                 "message": "Blocks the retry loop.",
             }
         ],
+        "filtered_findings": [],
         "redacted_files": [],
         "comment_posted": False,
         "prompt_over_budget": False,
