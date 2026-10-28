@@ -2274,7 +2274,9 @@ def _finding_at(line, message, severity=Severity.HIGH):
     )
 
 
-def _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, posted):
+def _run_review_posting(
+    tmp_path, monkeypatch, mock_github_client, mock_provider, findings, posted, args=("--comment",)
+):
     """Run `marginal review --comment` with `posted` as what GitHub already has.
 
     `posted` is a list of `create_review` calls from an earlier run; their
@@ -2297,7 +2299,114 @@ def _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider
     mock_provider.return_value.generate_structured = AsyncMock(
         return_value=_FindingsResponse(findings=findings)
     )
-    return main(["review", "--repo", "acme/widgets", "--pr", "42", "--comment"])
+    return main(["review", "--repo", "acme/widgets", "--pr", "42", *args])
+
+
+def _write_reviewer_config_with_labels(tmp_path):
+    _write_reviewer_config(tmp_path)
+    with (tmp_path / ".marginal" / "config.yaml").open("a") as config:
+        config.write("permissions:\n  write:\n    labels: true\n")
+
+
+def test_review_labels_the_pr_with_a_surviving_findings_severity(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_labels(tmp_path)
+    findings = [_finding_at(2, "This sleep blocks the async retry loop.")]
+
+    exit_code = _run_review_posting(
+        tmp_path, monkeypatch, mock_github_client, mock_provider, findings, []
+    )
+
+    assert exit_code == 0
+    mock_github_client.return_value.add_labels.assert_called_once_with(42, ["marginal:high"])
+
+
+def test_review_adds_one_label_per_severity_most_serious_first(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_labels(tmp_path)
+    findings = [
+        _finding_at(2, "The sleep is never cancelled.", Severity.LOW),
+        _finding_at(2, "This sleep blocks the async retry loop.", Severity.CRITICAL),
+        _finding_at(2, "The sleep length is hardcoded.", Severity.LOW),
+    ]
+
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, [])
+
+    mock_github_client.return_value.add_labels.assert_called_once_with(
+        42, ["marginal:critical", "marginal:low"]
+    )
+
+
+def test_review_adds_no_labels_with_write_labels_off(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config(tmp_path)
+    findings = [_finding_at(2, "This sleep blocks the async retry loop.")]
+
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, [])
+
+    mock_github_client.return_value.create_review.assert_called_once()
+    mock_github_client.return_value.add_labels.assert_not_called()
+
+
+def test_review_adds_no_labels_without_a_surviving_finding(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_labels(tmp_path)
+
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, [], [])
+
+    mock_github_client.return_value.add_labels.assert_not_called()
+
+
+def test_review_adds_no_labels_without_comment(
+    tmp_path, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_labels(tmp_path)
+    findings = [_finding_at(2, "This sleep blocks the async retry loop.")]
+
+    exit_code = _run_review_posting(
+        tmp_path, monkeypatch, mock_github_client, mock_provider, findings, [], args=()
+    )
+
+    assert exit_code == 0
+    mock_github_client.return_value.add_labels.assert_not_called()
+
+
+def test_review_warns_when_labelling_fails_and_still_finishes_the_run(
+    tmp_path, capsys, monkeypatch, mock_github_client, mock_provider
+):
+    _write_reviewer_config_with_labels(tmp_path)
+    client = mock_github_client.return_value
+    findings = [_finding_at(2, "This sleep blocks the async retry loop.")]
+    _run_review_posting(tmp_path, monkeypatch, mock_github_client, mock_provider, findings, [])
+    first_post = client.create_review.call_args
+    capsys.readouterr()
+
+    client.add_labels.side_effect = GitHubAPIError(403, "Resource not accessible by integration")
+    exit_code = _run_review_posting(
+        tmp_path,
+        monkeypatch,
+        mock_github_client,
+        mock_provider,
+        findings,
+        [first_post],
+        args=("--comment", "--format", "json"),
+    )
+
+    assert exit_code == 0
+    client.add_labels.assert_called_once()
+    # The later steps still run: the re-check of earlier findings and the JSON.
+    client.list_review_threads.assert_called_once_with(42)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["comment_posted"] is False
+    assert (
+        "marginal review: couldn't add labels: GitHub API error 403: "
+        "Resource not accessible by integration" in captured.err
+    )
+    assert "Traceback" not in captured.err
 
 
 def test_rerun_with_the_same_finding_reworded_posts_nothing(
