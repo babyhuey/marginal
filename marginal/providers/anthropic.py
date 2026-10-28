@@ -9,9 +9,12 @@ from pydantic import BaseModel
 
 from marginal.providers.base import record_usage, retry_once_on_validation_error
 from marginal.providers.credentials import require_env
-from marginal.providers.errors import ProviderAPIError, ProviderResponseError
+from marginal.providers.errors import ProviderAPIError
 
 DEFAULT_MAX_TOKENS = 4096
+# On the newest Claude models thinking is always on and counts toward
+# max_tokens, so structured output needs room for it before the tool call.
+STRUCTURED_MAX_TOKENS = 16_000
 _STRUCTURED_OUTPUT_TOOL = "emit_structured_output"
 
 
@@ -171,7 +174,7 @@ class AnthropicProvider:
     async def generate_structured(
         self, prompt: str, schema: type[BaseModel], **kwargs: object
     ) -> BaseModel:
-        max_tokens = kwargs.pop("max_tokens", DEFAULT_MAX_TOKENS)
+        max_tokens = kwargs.pop("max_tokens", STRUCTURED_MAX_TOKENS)
         input_schema = _strict_input_schema(schema)
 
         async def attempt() -> BaseModel:
@@ -188,19 +191,18 @@ class AnthropicProvider:
                             "strict": True,
                         }
                     ],
-                    tool_choice={"type": "tool", "name": _STRUCTURED_OUTPUT_TOOL},
+                    # The newest Claude models reject a forced tool_choice
+                    # ("tool" or "any"), so the tool is asked for in `system`.
+                    tool_choice={"type": "auto"},
+                    system=f"Answer only by calling the {_STRUCTURED_OUTPUT_TOOL} tool.",
                     **kwargs,
                 )
             except anthropic.APIError as exc:
                 raise ProviderAPIError("anthropic", str(exc)) from exc
             _record_usage(response)
-            tool_input = _find_tool_input(response, _STRUCTURED_OUTPUT_TOOL)
-            if tool_input is None:
-                raise ProviderResponseError(
-                    f"anthropic provider did not return the expected "
-                    f"{_STRUCTURED_OUTPUT_TOOL!r} tool call"
-                )
-            return schema.model_validate(tool_input)
+            # A reply without the tool call validates as None, which fails like
+            # malformed input and so gets the same single retry.
+            return schema.model_validate(_find_tool_input(response, _STRUCTURED_OUTPUT_TOOL))
 
         return await retry_once_on_validation_error("anthropic", attempt)
 

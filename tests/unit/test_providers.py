@@ -291,7 +291,7 @@ async def test_anthropic_generate_structured_wraps_validation_error():
         await provider.generate_structured("review this", Verdict)
 
 
-async def test_anthropic_generate_structured_raises_without_tool_use():
+async def test_anthropic_generate_structured_raises_after_two_replies_without_tool_use():
     client = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock()))
     client.messages.create.return_value = SimpleNamespace(
         content=[SimpleNamespace(type="text", text="not a tool call")]
@@ -301,7 +301,37 @@ async def test_anthropic_generate_structured_raises_without_tool_use():
     with pytest.raises(ProviderResponseError):
         await provider.generate_structured("review this", Verdict)
 
-    assert client.messages.create.call_count == 1
+    assert client.messages.create.call_count == 2
+
+
+async def test_anthropic_generate_structured_retries_a_reply_without_tool_use():
+    client = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock()))
+    client.messages.create.side_effect = [
+        SimpleNamespace(content=[SimpleNamespace(type="text", text="Here are the findings:")]),
+        _anthropic_tool_response({"approved": True, "reason": "looks good"}),
+    ]
+    provider = _anthropic_provider(client)
+
+    result = await provider.generate_structured("review this", Verdict)
+
+    assert result == Verdict(approved=True, reason="looks good")
+    assert client.messages.create.call_count == 2
+
+
+async def test_anthropic_generate_structured_asks_for_the_tool_without_forcing_it():
+    # Claude Opus 5.5 and Fable 5.1 reject tool_choice "tool" and "any" with a 400.
+    client = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock()))
+    client.messages.create.return_value = _anthropic_tool_response(
+        {"approved": True, "reason": "looks good"}
+    )
+    provider = _anthropic_provider(client)
+
+    await provider.generate_structured("review this", Verdict)
+
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["tool_choice"] == {"type": "auto"}
+    assert "emit_structured_output" in kwargs["system"]
+    assert kwargs["max_tokens"] == 16_000
 
 
 def _anthropic_tool_response(tool_input: object) -> SimpleNamespace:
