@@ -18,8 +18,12 @@ make format   # auto-fix
 ## Test
 
 ```bash
-make test
+make test            # tests/unit/, free: no model calls
+make review-quality  # tests/integration/review_quality/, calls the model
 ```
+
+`make test` runs the unit tests in `tests/unit/`. They mock GitHub and the
+model, so they're fast and free. Run them before every push.
 
 Optionally, install the pre-commit hooks so lint runs automatically before
 each commit:
@@ -28,6 +32,30 @@ each commit:
 pip install pre-commit
 pre-commit install
 ```
+
+`make review-quality` runs the review-quality benchmark in
+`tests/integration/review_quality/`: every **attempt** in `cases.yml` (a
+review tool with one provider and model, today marginal with Claude Opus 5.5)
+reviews every case 3 times, and `score.py` compares each attempt with its own
+line in `baseline.json`. It needs each attempt's provider key (and
+`GITHUB_TOKEN` for the GitHub API), and it **costs money**. You don't need to
+run it for a normal PR: it runs on every release PR, one GitHub Actions job
+per attempt. To benchmark another model, add an attempt to `cases.yml`; to run
+one locally, `python tests/integration/review_quality/run.py --attempt
+marginal/anthropic/claude-opus-5-5`.
+
+### Adding a benchmark case
+
+A case is a real PR from a public repo: one that introduced a bug someone
+later fixed or reverted, or a clean PR with nothing to flag.
+
+- **Propose one** with the
+  [Benchmark case](https://github.com/exactml/marginal/issues/new?template=benchmark_case.yml)
+  issue form. A maintainer checks it and adds it.
+- **Or add it to `cases.yml` directly** in a PR: pin the base and head SHAs,
+  link the PR that introduced the bug (`source`) and the fix or revert that
+  proves it (`evidence`), and give the file, line range, and expected
+  severity. A case without evidence won't be merged.
 
 ## Changelog
 
