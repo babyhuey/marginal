@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 import yaml
-from score import HERE, Attempt, Case, RepoSettings, load_suite
+from score import HERE, Attempt, Case, load_suite
 
 
 def download_snapshot(upstream: str, sha: str, dest: Path) -> Path:
@@ -139,7 +139,7 @@ def pr_agent_result(data: dict, attempt: Attempt) -> dict:
     """PR-Agent's structured review in the shape score.py reads.
 
     Each of its key issues names a file and a line range, but carries no
-    severity or confidence, so those stay None rather than being guessed.
+    severity or quoted evidence: severity stays None rather than being guessed.
     """
     findings = []
     for issue in (data.get("review") or {}).get("key_issues_to_review") or []:
@@ -152,14 +152,13 @@ def pr_agent_result(data: dict, attempt: Attempt) -> dict:
                 "line": start,
                 "end_line": end or start,
                 "severity": None,
-                "confidence": None,
                 "message": f"{header}: {content}" if header else content,
             }
         )
     usage = data.get("usage") or {}
     return {
         "findings": findings,
-        "filtered_findings": [],
+        "dropped_findings": [],
         "usage": {
             "model": f"{attempt.provider}:{attempt.model}",
             "input_tokens": usage.get("prompt_tokens"),
@@ -218,20 +217,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             (checkout / ".marginal").mkdir(exist_ok=True)
             for attempt in attempts:
-                case_config = repo_config(config, suite.repos.get(case.upstream))
-                failures += run_attempt(attempt, case, checkout, case_config, args.runs, args.out)
+                failures += run_attempt(attempt, case, checkout, config, args.runs, args.out)
     if failures:
         print(f"{failures} reviews failed", file=sys.stderr)
     return 1 if failures else 0
-
-
-def repo_config(config: dict, settings: RepoSettings | None) -> dict:
-    """marginal's config for one upstream repo's cases: the shared config,
-    with that repo's settings from cases.yml's `repos`."""
-    if settings is None:
-        return config
-    review = config.get("review", {}) | {"confidence_threshold": settings.confidence_threshold}
-    return config | {"review": review}
 
 
 def run_attempt(
