@@ -358,11 +358,13 @@ def run_review(
                 max_prompt_tokens=config.review.max_prompt_tokens,
             )
 
+    generated = findings
     findings = filter_findings(
         findings,
         confidence_threshold=config.review.confidence_threshold,
         max_comments=config.review.max_comments,
     )
+    filtered = [finding for finding in generated if finding not in findings]
 
     # Without a model call nothing was reviewed, so there's no verdict to give.
     reviewed = reviewer_model is not None and bool(reviewed_files) and over_budget is None
@@ -456,6 +458,7 @@ def run_review(
             redacted_files,
             comment_posted=comment_posted,
             prompt_over_budget=over_budget is not None,
+            filtered_findings=filtered,
         )
         # Summed over every model call above: findings, retry, self-critique, re-check.
         model = f"{reviewer_model.provider}:{reviewer_model.model}" if reviewer_model else None
@@ -735,6 +738,7 @@ def _build_json_result(
     *,
     comment_posted: bool,
     prompt_over_budget: bool,
+    filtered_findings: list[Finding],
 ) -> dict[str, object]:
     """Build the `--format json` payload for one review run.
 
@@ -748,7 +752,9 @@ def _build_json_result(
     "not reviewed", not "nothing found").
     A finding's `line` being `None` means what it does for
     `_build_inline_comments`. Reviewing two commits (`pr_number=None`) leaves
-    `title` and `state` `None`.
+    `title` and `state` `None`. `filtered_findings` are the ones the model
+    returned that `review.confidence_threshold` or `review.max_comments`
+    dropped: never posted, listed so their confidence shows how close they came.
     """
     is_pr = pr_number is not None
     return {
@@ -760,6 +766,7 @@ def _build_json_result(
         "head_sha": str(pull_request["head"]["sha"]),
         "changed_files": filenames,
         "findings": [finding.model_dump(mode="json") for finding in findings],
+        "filtered_findings": [f.model_dump(mode="json") for f in filtered_findings],
         "redacted_files": redacted_files,
         "comment_posted": comment_posted,
         "prompt_over_budget": prompt_over_budget,
