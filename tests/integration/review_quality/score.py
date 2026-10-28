@@ -34,11 +34,23 @@ _METRICS = [
     ("precision", "Precision", "ratio"),
     ("accuracy", "Accuracy (per PR)", "ratio"),
     ("severity_accuracy", "Severity accuracy", "ratio"),
-    ("seconds", "Time (median s per review)", "seconds"),
-    ("cost_usd", "Cost (USD per run)", "usd"),
+    ("seconds", "Time", "seconds"),
+    ("cost_usd", "Cost", "usd"),
     ("duplicates", "Duplicate findings", "count"),
     ("unlabeled", "Unlabeled findings", "count"),
 ]
+# One plain sentence per metric, shown next to it in the run summary.
+_MEANING = {
+    "recall": "Known bugs marginal posted a finding for",
+    "recall_before_filter": "Known bugs the model raised, including ones the filter dropped",
+    "precision": "Posted findings that point at a known bug, not at clean code",
+    "accuracy": "PRs judged right: a bug PR with a hit, a clean PR with no findings",
+    "severity_accuracy": "Hits rated at or above the expected severity",
+    "seconds": "Median seconds per review",
+    "cost_usd": "Model cost in USD of reviewing every case once",
+    "duplicates": "Extra findings on a bug already hit",
+    "unlabeled": "Findings outside the answer key, for a person to judge",
+}
 # Time and cost swing more between runs than the ratios, so they warn only on
 # a relative increase this large.
 _SLOWER_TOLERANCE = 0.25
@@ -247,11 +259,22 @@ def score_attempt(suite: Suite, raw_dir: Path) -> dict | None:
         return {key: _spread([m[key] for m in per_run]) for key, _, _ in _METRICS}
 
     kinds = sorted({case.kind for pairs in runs.values() for case, _ in pairs})
+    by_case: dict[str, dict] = {}
+    for pairs in runs.values():
+        for case, s in pairs:
+            counts = by_case.setdefault(
+                case.id, {"kind": case.kind, "runs": 0, "correct": 0, "raised": 0, "posted": 0}
+            )
+            counts["runs"] += 1
+            counts["correct"] += s["correct"]
+            counts["raised"] += s["hits_before_filter"] > 0
+            counts["posted"] += s["hits"] + s["false_positives"] + len(s["unlabeled"])
     return {
         "runs": len(runs),
-        "cases": sorted({case.id for pairs in runs.values() for case, _ in pairs}),
+        "cases": sorted(by_case),
         "overall": group(None),
         "by_kind": {kind: group(kind) for kind in kinds},
+        "by_case": dict(sorted(by_case.items())),
         "unlabeled": unlabeled,
     }
 
@@ -280,60 +303,129 @@ def _median(metrics: dict, key: str) -> float | None:
     return spread["median"] if spread else None
 
 
+def _dot(value: float | None, style: str) -> str:
+    """🟢/🟡/🔴 for a ratio, so a weak score stands out; blank for the rest."""
+    if style != "ratio":
+        return ""
+    if value is None:
+        return "⚪"
+    return "🟢" if value >= 0.8 else "🟡" if value >= 0.5 else "🔴"
+
+
 def markdown(result: dict, baseline: dict, tolerance: float) -> str:
-    """The comparison with the baseline, one section per attempt, for
-    $GITHUB_STEP_SUMMARY."""
-    lines = ["## Review quality"]
+    """The run summary for $GITHUB_STEP_SUMMARY: every attempt side by side,
+    one column each, then each attempt's details folded away."""
+    attempts = result["attempts"]
     old = baseline.get("attempts", {})
-    for attempt_id, attempt in result["attempts"].items():
+    lines = [
+        "## Review quality",
+        "",
+        "Each case is a real upstream PR with a known answer: a bug someone later fixed, "
+        "or clean code with nothing to flag.",
+        "",
+        "🟢 0.80 or more · 🟡 0.50 or more · 🔴 below 0.50 · ⚪ not measured · "
+        "⚠ worse than the baseline",
+        "",
+        "| Metric | "
+        + " | ".join(_attempt_header(i, a) for i, a in attempts.items())
+        + " | What it means |",
+        "|---|" + "--:|" * len(attempts) + "---|",
+    ]
+    for key, label, style in _METRICS:
+        cells = []
+        for attempt_id, attempt in attempts.items():
+            new = _median(attempt["overall"], key)
+            cell = " ".join(filter(None, [_dot(new, style), _format(new, style)]))
+            old_overall = old.get(attempt_id, {}).get("overall")
+            if old_overall:
+                before = _median(old_overall, key)
+                if before is not None and new is not None:
+                    if _regressed(before, new, style, tolerance):
+                        cell += " ⚠"
+            cells.append(cell)
+        lines.append(f"| **{label}** | " + " | ".join(cells) + f" | {_MEANING[key]} |")
+
+    cases = {
+        case_id: case["kind"]
+        for attempt in attempts.values()
+        for case_id, case in attempt.get("by_case", {}).items()
+    }
+    if cases:
         lines += [
             "",
-            f"### `{attempt_id}`",
-            "",
-            *_attempt_markdown(attempt, old.get(attempt_id, {}), tolerance),
+            "| Case | Kind | " + " | ".join(f"`{i}`" for i in attempts) + " |",
+            "|---|---|" + ":-:|" * len(attempts),
         ]
+        for case_id, kind in sorted(cases.items()):
+            cells = [_case_cell(a.get("by_case", {}).get(case_id)) for a in attempts.values()]
+            lines.append(f"| `{case_id}` | {kind} | " + " | ".join(cells) + " |")
+        lines += [
+            "",
+            "✅ caught, or quiet on a clean case · 🟡 raised but dropped by the confidence "
+            "threshold, or caught in only some runs · ❌ missed, or findings on a clean case",
+        ]
+    for attempt_id, attempt in attempts.items():
+        lines += ["", *_attempt_details(attempt_id, attempt, old.get(attempt_id, {}))]
     return "\n".join(lines)
 
 
-def _attempt_markdown(result: dict, baseline: dict, tolerance: float) -> list[str]:
-    lines = [
-        f"{len(result['cases'])} cases × {result['runs']} runs; median across runs, "
-        "with the min-max range.",
-        "",
-    ]
+def _attempt_header(attempt_id: str, attempt: dict) -> str:
+    runs = attempt["runs"]
+    return f"`{attempt_id}` ({runs} run{'s' * (runs > 1)})"
+
+
+def _case_cell(case: dict | None) -> str:
+    """One case's outcome for one attempt, across its runs."""
+    if case is None:
+        return "—"
+    runs, correct = case["runs"], case["correct"]
+    of = f" {correct}/{runs}" if runs > 1 else ""
+    if case["kind"] == "clean":
+        if correct == runs:
+            return "✅ quiet"
+        return f"❌ {case['posted']} findings" + (f", quiet{of}" if correct else "")
+    if correct == runs:
+        return "✅ caught"
+    if correct:
+        return f"🟡 caught{of}"
+    if case["raised"]:
+        raised = f" {case['raised']}/{runs}" if runs > 1 else ""
+        return f"🟡 raised{raised}, filtered"
+    return "❌ missed"
+
+
+def _attempt_details(attempt_id: str, result: dict, baseline: dict) -> list[str]:
+    """Baseline, range and unlabeled findings for one attempt, folded."""
+    runs = result["runs"]
     old_overall = baseline.get("overall")
+    summary = f"`{attempt_id}`: {len(result['cases'])} cases × {runs} run{'s' * (runs > 1)}"
+    lines = [f"<details><summary>{summary}, baseline and details</summary>", ""]
     if not old_overall:
         lines += ["No baseline yet.", ""]
-    header = "Baseline → now" if old_overall else "Now"
-    lines += [f"| Metric | {header} | Range |", "|---|---|---|"]
+    columns = ["Metric", "Now", "Baseline", *(["Range"] * (runs > 1))]
+    lines += ["| " + " | ".join(columns) + " |", "|---" + "|--:" * (len(columns) - 1) + "|"]
     for key, label, style in _METRICS:
-        spread = result["overall"][key]
         new = _median(result["overall"], key)
-        cell = _format(new, style)
-        if old_overall:
-            old = _median(old_overall, key)
-            cell = f"{_format(old, style)} → {cell}"
-            if old is not None and new is not None and _regressed(old, new, style, tolerance):
-                cell += " ⚠"
-        span = f"{_format(spread['min'], style)}–{_format(spread['max'], style)}" if spread else ""
-        lines.append(f"| {label} | {cell} | {span} |")
-
-    ratio_metrics = [(key, label) for key, label, style in _METRICS if style == "ratio"]
-    lines += [
-        "",
-        "| Kind | " + " | ".join(label for _, label in ratio_metrics) + " |",
-        "|---" * (len(ratio_metrics) + 1) + "|",
-    ]
-    for kind, metrics in result["by_kind"].items():
-        cells = [_format(_median(metrics, key), "ratio") for key, _ in ratio_metrics]
-        lines.append(f"| {kind} | " + " | ".join(cells) + " |")
+        before = _median(old_overall, key) if old_overall else None
+        cells = [label, _format(new, style), _format(before, style) if old_overall else "—"]
+        if runs > 1:
+            spread = result["overall"][key]
+            cells.append(
+                f"{_format(spread['min'], style)}–{_format(spread['max'], style)}" if spread else ""
+            )
+        lines.append("| " + " | ".join(cells) + " |")
     if result["unlabeled"]:
         lines += [
             "",
-            f"{len(result['unlabeled'])} unlabeled findings are listed in score.json "
-            "for a person to judge.",
+            f"{len(result['unlabeled'])} unlabeled findings to judge:",
+            "",
+            *(
+                f"- `{f['case']}` run {f['run']}: `{f['file']}:{f['line']}` "
+                f"{f['severity']}, {f['confidence']}: {f['message']}"
+                for f in result["unlabeled"]
+            ),
         ]
-    return lines
+    return [*lines, "", "</details>"]
 
 
 def main(argv: list[str] | None = None) -> int:
