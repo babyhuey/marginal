@@ -1,0 +1,42 @@
+# Benchmark cases: real upstream PRs pinned by SHA, each with an answer key.
+# A hit is a finding in a must_find file with its line inside `lines`; a
+# finding inside must_not_flag, or anywhere on a `clean` case, is a false
+# positive; anything else is unlabeled and listed for a person to judge.
+config: marginal-config.yaml
+
+# Every attempt reviews every case: a review tool, and the provider and model
+# it calls. Scores are kept per attempt.
+attempts:
+  - {tool: marginal, provider: anthropic, model: claude-opus-5-5}
+
+cases:
+  - id: missing-auth-on-camelcase-alias
+    upstream: mlflow/mlflow
+    base: 51846bf4363a9206d3bc22c8bc87188b66e920fe
+    head: 4bb7474771c3be808cd9e129defef9305f2869be
+    kind: security
+    source: https://github.com/mlflow/mlflow/pull/24293
+    evidence: https://github.com/mlflow/mlflow/pull/25892
+    must_find:
+      - {file: mlflow/server/auth/__init__.py, lines: [1184, 1192], severity: high}
+    must_not_flag: []
+
+  - id: unset-proto-field-treated-as-zero
+    upstream: mlflow/mlflow
+    base: f4f92549e194a80746d85b1e869fe552457525e6
+    head: bf9147937e2648af5f1740a388edd52b2bc20592
+    kind: logic
+    source: https://github.com/mlflow/mlflow/pull/16325
+    evidence: https://github.com/mlflow/mlflow/pull/23917
+    must_find:
+      - {file: mlflow/server/handlers.py, lines: [1172, 1177], severity: medium}
+    must_not_flag: []
+
+  - id: clean-from-proto-classmethods
+    upstream: mlflow/mlflow
+    base: 2aec126dafd5728ce82e3069b3cd913a983a7697
+    head: 469939287d617631896902f363555d84df2c2860
+    kind: clean
+    source: https://github.com/mlflow/mlflow/pull/23722
+    must_find: []
+    must_not_flag: []
