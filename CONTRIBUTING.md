@@ -35,16 +35,22 @@ pre-commit install
 
 `make review-quality` runs the review-quality benchmark in
 `tests/integration/review_quality/`: every **attempt** in `cases.yml` (a
-review tool with one provider and model, today marginal with Claude Opus 5.5)
-reviews every case once (`make review-quality RUNS=3` for more), and `score.py` compares each attempt with its own
-line in `baseline.json`. `repos` in `cases.yml` sets marginal's settings per
-upstream repo (today `mlflow/mlflow: {confidence_threshold: 0.6}`); other repos
-use the defaults. It needs each attempt's provider key (and
+review tool with one provider and model: today marginal and
+[PR-Agent](https://github.com/qodo-ai/pr-agent), both with Claude Opus 5.5)
+reviews every case once (`make review-quality RUNS=3` for more), and
+`score.py` compares each attempt with its own line in `baseline.json`.
+`repos` in `cases.yml` sets marginal's settings per upstream repo (today
+`mlflow/mlflow: {confidence_threshold: 0.6}`); other repos use the defaults.
+PR-Agent has no confidence threshold, so it ignores them. It needs each
+attempt's provider key (and
 `GITHUB_TOKEN` for the GitHub API), and it **costs money**. You don't need to
 run it for a normal PR: it runs on every release PR, one GitHub Actions job
 per attempt. To benchmark another model, add an attempt to `cases.yml`; to run
 one locally, `python tests/integration/review_quality/run.py --attempt
-marginal/anthropic/claude-opus-5-5`.
+marginal/anthropic/claude-opus-5-5`. The PR-Agent attempt runs PR-Agent in its
+plain-diff mode, which never contacts GitHub, from its own Python 3.12+
+environment: `pip install pr-agent==0.49.0` there and point
+`PR_AGENT_PYTHON` at that environment's `python`.
 
 ### Adding a benchmark case
 
