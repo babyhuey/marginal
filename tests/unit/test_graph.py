@@ -120,3 +120,16 @@ def test_build_symbol_graph_handles_a_repo_with_no_python_files(repo):
 
     assert graph.definitions == {}
     assert graph.callers == {}
+
+
+def test_build_symbol_graph_skips_a_file_that_does_not_parse(repo):
+    _write(repo, "pkg/a.py", "def helper():\n    return 1\n")
+    _write(repo, "pkg/b.py", "from pkg.a import helper\n\n\ndef use():\n    return helper()\n")
+    # Kept broken on purpose, like Django's tests_syntax_error.py fixture.
+    _write(repo, "pkg/broken.py", "def broken(:\n")
+
+    graph = build_symbol_graph(repo)
+
+    assert graph.unparsed_files == ["pkg/broken.py"]
+    assert set(graph.definitions) == {"pkg.a.helper", "pkg.b.use"}
+    assert [(s.file, s.line) for s in graph.callers["pkg.a.helper"]] == [("pkg/b.py", 5)]

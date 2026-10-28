@@ -8,7 +8,7 @@ import json
 import math
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, get_args
 
@@ -24,7 +24,7 @@ from marginal.github.errors import (
     GitHubError,
     PermissionDeniedError,
 )
-from marginal.graph import ChangedDefinition, build_symbol_graph, find_out_of_diff_callers
+from marginal.graph import CallSite, ChangedDefinition, build_symbol_graph, find_out_of_diff_callers
 from marginal.graph.diff import _hunk_ranges
 from marginal.policy import load_policies
 from marginal.providers.base import reset_usage, usage
@@ -843,6 +843,14 @@ def _build_graph_context(
         return []
     try:
         graph = build_symbol_graph(repo_root)
+        if graph.unparsed_files:
+            shown = ", ".join(graph.unparsed_files[:3])
+            more = len(graph.unparsed_files) - 3
+            print(
+                f"marginal review: warning: code graph skipped {len(graph.unparsed_files)} "
+                f"file(s) it couldn't parse: {shown}" + (f" (+{more} more)" if more > 0 else ""),
+                file=sys.stderr,
+            )
         return find_out_of_diff_callers(graph, files)
     except Exception as exc:
         print(
@@ -980,31 +988,54 @@ def _build_graph_context_section(
     `MAX_GRAPH_CONTEXT_CALLERS` caller snippets total, across every changed
     definition, so a definition with a huge fan-out can't blow up the prompt.
     """
-    blocks: list[str] = []
+    # Share the budget round-robin, one caller per definition per pass, so each
+    # changed definition gets callers before any gets many: library code before
+    # tests, then a changed method before the class around it, whose many
+    # callers would otherwise fill the budget.
+    ordered = sorted(
+        graph_context,
+        key=lambda c: (
+            _is_test_path(c.definition.file),
+            c.definition.line_end - c.definition.line_start,
+        ),
+    )
+    pending: list[Iterator[CallSite] | None] = [iter(c.callers) for c in ordered]
+    picked: list[list[str]] = [[] for _ in ordered]
     remaining = MAX_GRAPH_CONTEXT_CALLERS
-    for changed in graph_context:
-        if remaining <= 0:
-            break
-        caller_blocks = []
-        for site in changed.callers:
-            if len(caller_blocks) >= remaining:
-                break
-            snippet = _read_snippet(repo_root, site.file, site.line)
-            if snippet is not None:
-                caller_blocks.append(f"{site.file}:{site.line}\n{snippet}")
-        if not caller_blocks:
-            continue
-        remaining -= len(caller_blocks)
-        blocks.append(
-            f"`{changed.definition.qualified_name}` (defined in "
-            f"{changed.definition.file}) is called from:\n\n" + "\n\n".join(caller_blocks)
-        )
+    while remaining > 0 and any(sites is not None for sites in pending):
+        for i, sites in enumerate(pending):
+            if sites is None or remaining <= 0:
+                continue
+            for site in sites:
+                snippet = _read_snippet(repo_root, site.file, site.line)
+                if snippet is not None:
+                    picked[i].append(f"{site.file}:{site.line}\n{snippet}")
+                    remaining -= 1
+                    break
+            else:
+                pending[i] = None
+    blocks = [
+        f"`{changed.definition.qualified_name}` (defined in "
+        f"{changed.definition.file}) is called from:\n\n" + "\n\n".join(picked[i])
+        for i, changed in enumerate(ordered)
+        if picked[i]
+    ]
     if not blocks:
         return None
     return (
         "This diff changes definitions that other, unchanged files in the repo call -- "
         "check whether the change is compatible with how they're used there:\n\n"
         + "\n\n".join(blocks)
+    )
+
+
+def _is_test_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    name = parts[-1] if parts else ""
+    return (
+        bool({"tests", "test"} & set(parts))
+        or name.startswith("test_")
+        or name.endswith("_test.py")
     )
 
 

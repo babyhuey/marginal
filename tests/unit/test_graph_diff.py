@@ -135,3 +135,30 @@ def test_find_out_of_diff_callers_reports_each_touched_definition_once(repo):
     changed = find_out_of_diff_callers(graph, files)
 
     assert len(changed) == 1
+
+
+def test_find_out_of_diff_callers_keeps_a_same_file_caller_outside_the_hunks(repo):
+    # Like Django's _save_table calling _is_pk_set far below the changed lines:
+    # in the changed file, but not in the part of it the diff shows.
+    _write(
+        repo,
+        "pkg/a.py",
+        "def helper():\n    return 1\n" + "\n" * 30 + "def save():\n    return helper()\n",
+    )
+    _write(repo, "pkg/b.py", "def use_helper():\n    return helper()\n")
+    graph = build_symbol_graph(repo)
+    files = [
+        {
+            "filename": "pkg/a.py",
+            "patch": "@@ -1,2 +1,2 @@\n def helper():\n-    return 0\n+    return 1\n",
+        }
+    ]
+
+    changed = find_out_of_diff_callers(graph, files)
+
+    helper = next(c for c in changed if c.definition.qualified_name == "pkg.a.helper")
+    # Same-file callers come first.
+    assert [(site.file, site.line) for site in helper.callers] == [
+        ("pkg/a.py", 34),
+        ("pkg/b.py", 2),
+    ]
