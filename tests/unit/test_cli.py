@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -19,6 +20,7 @@ from marginal.cli.review import (
     REVIEW_HEADING,
     _base_lines,
     _build_finding_prompt,
+    _build_graph_context,
     _build_graph_context_section,
     _build_inline_comments,
     _build_json_result,
@@ -28,6 +30,7 @@ from marginal.cli.review import (
     _finding_badge,
     _FindingsResponse,
     _is_ignored,
+    _is_test_path,
     _missing_patch_filenames,
     _redact_patches,
     _redacted_filenames,
@@ -3035,3 +3038,59 @@ def test_a_finding_in_a_file_without_a_patch_goes_in_the_body(
     call = client.create_review.call_args
     assert call.kwargs["comments"] == []
     assert "`logo.png:1`" in call.args[1]
+
+
+def test_build_graph_context_keeps_callers_when_a_file_does_not_parse(tmp_path, capsys):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("def helper():\n    return 1\n")
+    (tmp_path / "b.py").write_text("from a import helper\n\n\ndef use():\n    return helper()\n")
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    files = [
+        {
+            "filename": "a.py",
+            "patch": "@@ -1,2 +1,2 @@\n def helper():\n-    return 0\n+    return 1",
+        }
+    ]
+
+    context = _build_graph_context(str(tmp_path), files, enabled=True)
+
+    # The broken file used to drop the whole graph; now only it is left out.
+    assert [c.definition.qualified_name for c in context] == ["a.helper"]
+    assert [(s.file, s.line) for s in context[0].callers] == [("b.py", 5)]
+    assert "code graph skipped 1 file(s) it couldn't parse: broken.py" in capsys.readouterr().err
+
+
+def test_build_graph_context_section_shares_callers_fairly_and_puts_tests_last(tmp_path):
+    lines = "\n".join(f"x{i} = {i}" for i in range(1, 40)) + "\n"
+    (tmp_path / "lib.py").write_text(lines)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_lib.py").write_text(lines)
+
+    def changed(name, file, start, end, caller_lines):
+        return ChangedDefinition(
+            definition=Definition(qualified_name=name, file=file, line_start=start, line_end=end),
+            callers=[CallSite(file="lib.py", line=n) for n in caller_lines],
+        )
+
+    context = [
+        # A class around the change, with many callers, listed first.
+        changed("lib.Model", "lib.py", 1, 300, range(1, 30)),
+        changed("tests.test_lib.helper", "tests/test_lib.py", 5, 6, [31]),
+        changed("lib.Model.method", "lib.py", 10, 12, [33, 34, 35]),
+    ]
+
+    section = _build_graph_context_section(context, str(tmp_path))
+
+    shown = re.findall(r"^`([^`]+)` \(defined in", section, re.M)
+    # Library code before tests, the method before the class around it.
+    assert shown == ["lib.Model.method", "lib.Model", "tests.test_lib.helper"]
+    # Every definition gets callers; the class doesn't take the whole budget.
+    assert section.count("lib.py:3") >= 3  # the method's 33, 34, 35
+    assert len(re.findall(r"^lib\.py:\d+$", section, re.M)) == MAX_GRAPH_CONTEXT_CALLERS
+
+
+def test_is_test_path():
+    assert _is_test_path("tests/basic/tests.py")
+    assert _is_test_path("pkg/test_utils.py")
+    assert _is_test_path("pkg/utils_test.py")
+    assert not _is_test_path("django/db/models/base.py")
