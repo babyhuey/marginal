@@ -46,6 +46,8 @@ class SymbolGraph(BaseModel):
 
     definitions: dict[str, Definition] = Field(default_factory=dict)
     callers: dict[str, list[CallSite]] = Field(default_factory=dict)
+    # Files that couldn't be parsed, and so add no definitions or calls.
+    unparsed_files: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +89,11 @@ def build_symbol_graph(repo_root: Path | str) -> SymbolGraph:
     anywhere in the repo whose name matches uniquely. A call that matches
     zero or several definitions is left unresolved -- no type inference,
     no guessing.
+
+    A file that doesn't parse -- newer syntax than the running Python
+    understands, or a file kept broken on purpose (as in a test fixture) --
+    is skipped and listed in `unparsed_files`, so it costs only its own
+    definitions and calls, not the whole graph.
     """
     root = Path(repo_root)
     files = _list_python_files(root)
@@ -94,9 +101,15 @@ def build_symbol_graph(repo_root: Path | str) -> SymbolGraph:
     by_qualified: dict[str, Definition] = {}
     by_simple: dict[str, list[Definition]] = defaultdict(list)
     raw_calls: list[_RawCall] = []
+    unparsed: list[str] = []
 
     for file in files:
-        symbols = _parse_file(root, file)
+        try:
+            symbols = _parse_file(root, file)
+        except (SyntaxError, ValueError, UnicodeDecodeError):
+            # ValueError: source with a null byte. UnicodeDecodeError: not UTF-8.
+            unparsed.append(file)
+            continue
         raw_calls.extend(symbols.calls)
         for raw in symbols.definitions:
             definition = Definition(
@@ -114,7 +127,7 @@ def build_symbol_graph(repo_root: Path | str) -> SymbolGraph:
         if target is not None:
             callers[target.qualified_name].append(CallSite(file=call.file, line=call.line))
 
-    return SymbolGraph(definitions=by_qualified, callers=dict(callers))
+    return SymbolGraph(definitions=by_qualified, callers=dict(callers), unparsed_files=unparsed)
 
 
 def _list_python_files(root: Path) -> list[str]:

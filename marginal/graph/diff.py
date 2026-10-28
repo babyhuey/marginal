@@ -42,8 +42,13 @@ def find_out_of_diff_callers(
     its `line_start`..`line_end` span; an unchanged definition is skipped
     entirely, and a definition touched by more than one hunk is only
     reported once.
+
+    A caller counts as out of the diff unless its line is inside one of the
+    diff's hunks, the part the model already sees -- a caller elsewhere in a
+    changed file is exactly as hidden as one in another file. Callers in the
+    definition's own file come first.
     """
-    changed_files = {str(file["filename"]) for file in files}
+    hunks = {str(file["filename"]): _hunk_ranges(str(file.get("patch", ""))) for file in files}
     definitions_by_file: dict[str, list[Definition]] = defaultdict(list)
     for definition in graph.definitions.values():
         definitions_by_file[definition.file].append(definition)
@@ -59,16 +64,23 @@ def find_out_of_diff_callers(
                     continue
                 if definition.line_end < start or definition.line_start > end:
                     continue
-                callers = [
-                    site
-                    for site in graph.callers.get(definition.qualified_name, [])
-                    if site.file not in changed_files
-                ]
+                callers = sorted(
+                    (
+                        site
+                        for site in graph.callers.get(definition.qualified_name, [])
+                        if not _in_hunks(site, hunks)
+                    ),
+                    key=lambda site: site.file != definition.file,
+                )
                 changed[definition.qualified_name] = ChangedDefinition(
                     definition=definition, callers=callers
                 )
 
     return list(changed.values())
+
+
+def _in_hunks(site: CallSite, hunks: dict[str, list[tuple[int, int]]]) -> bool:
+    return any(start <= site.line <= end for start, end in hunks.get(site.file, []))
 
 
 def _hunk_ranges(patch: str) -> list[tuple[int, int]]:
