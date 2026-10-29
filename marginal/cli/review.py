@@ -236,7 +236,10 @@ def run_review(
     instead of being folded into the review's overall body -- it still shows
     up in the printed summary above, just not duplicated into the body too.
     One with no identifiable line still falls back to the body, so it isn't
-    silently dropped. Omitting `--comment` posts nothing back to GitHub.
+    silently dropped. With `permissions.write.labels` on, the PR also gets a
+    `marginal:<severity>` label for each severity among the findings that
+    survived (`GitHubClient.add_labels`); a failure there only logs a line to
+    stderr. Omitting `--comment` posts nothing back to GitHub.
 
     With `comment` set, a PR `_skip_reason` names -- `review.enabled` off,
     a draft, a bot author, or a `review.skip_labels` label -- gets no model
@@ -441,6 +444,12 @@ def run_review(
         except (PermissionDeniedError, GitHubAuthenticationError, GitHubAPIError) as exc:
             print(f"marginal review: {exc}", file=sys.stderr)
             return 1
+        # Labels only add triage signal, so failing to add them never fails the review.
+        if findings and config.permissions.write.labels:
+            try:
+                client.add_labels(pr_number, _severity_labels(findings))
+            except GitHubError as exc:
+                print(f"marginal review: couldn't add labels: {exc}", file=sys.stderr)
         # Each later push also re-checks what marginal flagged before; only a
         # resolved finding gets anything posted.
         if already_reviewed and reviewed:
@@ -635,6 +644,13 @@ def _verdict(findings: list[Finding], *, already_posted: int = 0) -> str:
     if already_posted:
         verdict += f" · {already_posted} already flagged earlier on this PR"
     return verdict
+
+
+def _severity_labels(findings: list[Finding]) -> list[str]:
+    """One `marginal:<severity>` label per severity among `findings`, most
+    serious first. The fixed prefix keeps marginal off labels it doesn't own."""
+    present = {finding.severity for finding in findings}
+    return [f"marginal:{severity.value}" for severity in SEVERITY_EMOJI if severity in present]
 
 
 def _finding_badge(finding: Finding, *, with_location: bool) -> str:

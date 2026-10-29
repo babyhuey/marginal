@@ -183,6 +183,16 @@ class GitHubClient:
             json={"body": body},
         )
 
+    def add_labels(self, number: int, labels: list[str]) -> list[dict[str, object]]:
+        """Add `labels` to PR `number`, keeping the labels it already has.
+
+        Requires `permissions.write.labels`.
+        """
+        self._require_write("labels")
+        return self._request(
+            "POST", f"/repos/{self._repo}/issues/{number}/labels", json={"labels": labels}
+        )
+
     def resolve_review_thread(self, thread_id: str) -> None:
         """Mark review thread `thread_id` resolved, as the "Resolve conversation"
         button does. Requires `permissions.write.comments`."""

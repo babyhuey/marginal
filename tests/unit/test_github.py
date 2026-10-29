@@ -337,6 +337,29 @@ def test_reply_to_review_comment_denied_without_write_comments(monkeypatch):
     session.request.assert_not_called()
 
 
+def test_add_labels_posts_them_on_the_issue(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(200, [{"name": "marginal:high"}])
+    client = _client(PermissionsConfig(write=PermissionsWrite(labels=True)), session)
+
+    client.add_labels(7, ["marginal:high"])
+
+    call = session.request.call_args
+    assert call.args == ("POST", "https://api.github.com/repos/acme/widgets/issues/7/labels")
+    assert call.kwargs["json"] == {"labels": ["marginal:high"]}
+
+
+def test_add_labels_denied_without_write_labels(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    client = _client(session=session)
+
+    with pytest.raises(PermissionDeniedError, match="permissions.write.labels"):
+        client.add_labels(7, ["marginal:high"])
+    session.request.assert_not_called()
+
+
 def _threads_page(nodes, next_cursor=None):
     return {
         "data": {
