@@ -165,6 +165,8 @@ jobs:
 
 Open a PR, and marginal builds context, reasons over the change, and posts inline comments plus a summary — all inside your own GitHub Actions run.
 
+If a `workflow_run` event triggers marginal instead (another workflow, such as your tests, finished), the review prompt also gets that run's conclusion as context. The job then needs `actions: read` in its `permissions:` to read the run.
+
 ### Check your setup
 
 `marginal doctor` checks everything a review needs, without calling a model or posting anything: that `.marginal/config.yaml` is valid, that `models.reviewer` is set and each configured provider's API key is in the environment, that `permissions` let `marginal review` read the PR, and that `GITHUB_TOKEN` is set. If `permissions.write.comments` is off it prints a note rather than a failure, since `--comment` is only needed to post. With `--repo`, it also makes one read-only GitHub call to confirm the token is accepted and the repository is reachable.

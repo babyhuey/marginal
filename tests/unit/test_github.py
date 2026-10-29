@@ -311,6 +311,29 @@ def test_pr_comment_reads_denied_without_read_permission(monkeypatch, method):
     session.request.assert_not_called()
 
 
+def test_get_workflow_run_reads_the_run(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    session.request.return_value = _response(200, {"id": 123, "conclusion": "failure"})
+    client = _client(session=session)
+
+    run = client.get_workflow_run(123)
+
+    assert run == {"id": 123, "conclusion": "failure"}
+    call = session.request.call_args
+    assert call.args == ("GET", "https://api.github.com/repos/acme/widgets/actions/runs/123")
+
+
+def test_get_workflow_run_denied_without_read_repository(monkeypatch):
+    monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
+    session = MagicMock()
+    client = _client(PermissionsConfig(read=PermissionsRead(repository=False)), session)
+
+    with pytest.raises(PermissionDeniedError, match="permissions.read.repository"):
+        client.get_workflow_run(123)
+    session.request.assert_not_called()
+
+
 def test_reply_to_review_comment_posts_in_the_thread(monkeypatch):
     monkeypatch.setenv(GITHUB_TOKEN_ENV_VAR, "ghp_secret")
     session = MagicMock()
