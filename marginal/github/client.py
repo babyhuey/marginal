@@ -81,6 +81,12 @@ class GitHubClient:
             return None
         return base64.b64decode(str(data["content"])).decode()
 
+    def get_workflow_run(self, run_id: int) -> dict[str, object]:
+        """Return GitHub Actions workflow run `run_id`, including its
+        `conclusion` (`None` while the run is still in progress)."""
+        self._require_read("repository")
+        return self._request("GET", f"/repos/{self._repo}/actions/runs/{run_id}")
+
     def get_pull_request(self, number: int) -> dict[str, object]:
         """Return the pull request's title, body, base/head SHAs, and state."""
         self._require_read("pull_requests")
