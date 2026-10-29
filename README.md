@@ -165,7 +165,7 @@ jobs:
 
 Open a PR, and marginal builds context, reasons over the change, and posts inline comments plus a summary — all inside your own GitHub Actions run.
 
-If a `workflow_run` event triggers marginal instead (another workflow, such as your tests, finished), the review prompt also gets that run's conclusion as context. The job then needs `actions: read` in its `permissions:` to read the run.
+If a `workflow_run` event triggers marginal instead (another workflow, such as your tests, finished), the review prompt also gets that run's conclusion as context. The job then needs `actions: read` in its `permissions:` to read the run, and `pr-number:` passed to the action, since a `workflow_run` event has no `pull_request` to take it from (for a PR from a fork, `github.event.workflow_run.pull_requests` is empty too). A `workflow_run` job also gets your secrets and a write token even for a PR from a fork, so that PR's diff reaches your model with those permissions in place; keep the job's `permissions:` to what marginal needs.
 
 ### Check your setup
 
