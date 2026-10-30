@@ -442,7 +442,8 @@ def run_review(
         except GitHubError as exc:
             print(f"marginal review: {exc}", file=sys.stderr)
             return 1
-        # Labels only add triage signal, so failing to add them never fails the review.
+        # Labels only add triage signal, so failing to add or remove one never
+        # fails the review.
         if config.permissions.write.labels:
             wanted = _severity_labels(findings)
             if wanted:
@@ -450,15 +451,19 @@ def run_review(
                     client.add_labels(pr_number, wanted)
                 except GitHubError as exc:
                     print(f"marginal review: couldn't add labels: {exc}", file=sys.stderr)
-        # Without a review there are no current findings to judge a label by, and
-        # a finding capped by `review.max_comments` is still there.
-        if config.permissions.write.labels and reviewed:
-            capped = [d.finding for d in dropped if d.reason == OVER_MAX_COMMENTS]
-            for name in _stale_severity_labels(pull_request, _severity_labels(findings + capped)):
-                try:
-                    client.remove_label(pr_number, name)
-                except GitHubError as exc:
-                    print(f"marginal review: couldn't remove label {name}: {exc}", file=sys.stderr)
+            # Without a review there are no current findings to judge a label by,
+            # and a finding capped by `review.max_comments` is still there.
+            if reviewed:
+                capped = [d.finding for d in dropped if d.reason == OVER_MAX_COMMENTS]
+                kept = _severity_labels(findings + capped)
+                for name in _stale_severity_labels(pull_request, kept):
+                    try:
+                        client.remove_label(pr_number, name)
+                    except GitHubError as exc:
+                        print(
+                            f"marginal review: couldn't remove label {name}: {exc}",
+                            file=sys.stderr,
+                        )
         # Each later push also re-checks what marginal flagged before; only a
         # resolved finding gets anything posted.
         if already_reviewed and reviewed:
@@ -656,6 +661,9 @@ def _verdict(findings: list[Finding], *, already_posted: int = 0) -> str:
     return verdict
 
 
+_SEVERITY_LABELS = {f"marginal:{severity.value}" for severity in Severity}
+
+
 def _severity_labels(findings: list[Finding]) -> list[str]:
     """One `marginal:<severity>` label per severity among `findings`, most
     serious first. The fixed prefix keeps marginal off labels it doesn't own."""
@@ -664,10 +672,11 @@ def _severity_labels(findings: list[Finding]) -> list[str]:
 
 
 def _stale_severity_labels(pull_request: dict[str, object], wanted: list[str]) -> list[str]:
-    """The `marginal:` labels on `pull_request` that aren't in `wanted` -- a
-    severity no finding still earns. Labels without that prefix aren't marginal's."""
+    """The severity labels on `pull_request` that aren't in `wanted` -- a
+    severity no finding still earns. Any other label, even one starting
+    `marginal:`, isn't marginal's."""
     names = [str(label["name"]) for label in pull_request.get("labels") or []]
-    return [name for name in names if name.startswith("marginal:") and name not in wanted]
+    return [name for name in names if name in _SEVERITY_LABELS and name not in wanted]
 
 
 def _finding_badge(finding: Finding, *, with_location: bool) -> str:

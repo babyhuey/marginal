@@ -2732,10 +2732,12 @@ def test_review_removes_a_severity_label_no_finding_earns_any_more(
         mock_provider,
         [],
         [],
-        labels=["marginal:critical", "bug", "marginal-foo", "marginal"],
+        labels=["marginal:critical", "bug", "marginal-foo", "marginal", "marginal:wip"],
     )
 
     client = mock_github_client.return_value
+    # A team's own `marginal:` label isn't a severity marginal set.
+    assert (42, "marginal:wip") not in [c.args for c in client.remove_label.call_args_list]
     client.remove_label.assert_called_once_with(42, "marginal:critical")
     client.add_labels.assert_not_called()
 
